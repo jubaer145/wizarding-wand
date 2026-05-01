@@ -1282,7 +1282,7 @@ function fireSpell(name, def) {
 // =========================================================================
 function spawnDummies() {
   state.dummies = [];
-  const N = 3;
+  const N = 5;
   for (let i = 0; i < N; i++) {
     state.dummies.push(makeDummy());
   }
@@ -1299,6 +1299,11 @@ function makeDummy() {
     burnUntil: 0, frozenUntil: 0,
     levitateUntil: 0,
     sway: Math.random() * Math.PI * 2,
+    // wraith look: per-dementor phase + size jitter so they don't sync
+    mistPhase: Math.random() * Math.PI * 2,
+    tatterSeed: Math.random() * 100,
+    sizeMul: 0.85 + Math.random() * 0.4,   // 0.85x .. 1.25x
+    breathParticles: [],
     bornAt: millis(), respawnAt: 0
   };
 }
@@ -1812,11 +1817,32 @@ function drawDummies(ctx) {
       ctx.beginPath(); ctx.ellipse(d.x, d.y, 70, 90, 0, 0, Math.PI*2); ctx.fill();
       ctx.globalAlpha = f;
     }
-    // Cloaked figure: tall hood shape
-    const w = 60, h = 110;
-    const cx = d.x, cy = d.y;
+    // Cloaked dementor: per-instance scale + animated mist/tatters
+    const scale = d.sizeMul || 1;
+    const w = 64 * scale, h = 124 * scale;
+    // Vertical float — slow bob on top of velocity
+    const float = Math.sin(t * 0.0018 + d.mistPhase) * 4;
+    const cx = d.x;
+    const cy = d.y + float;
 
-    // outer aura per status
+    // === Dark mist aura behind body ===
+    // 4 drifting ellipses simulate a cloud of darkness clinging to the dementor
+    for (let i = 0; i < 4; i++) {
+      const ph = d.mistPhase + i * 1.7 + t * 0.0009;
+      const ox = Math.cos(ph) * w * 0.5;
+      const oy = Math.sin(ph * 1.3) * h * 0.25;
+      const rx = w * (0.95 + 0.18 * Math.sin(ph * 0.7));
+      const ry = h * (0.65 + 0.12 * Math.cos(ph));
+      const grd = ctx.createRadialGradient(cx + ox, cy + oy, 0, cx + ox, cy + oy, Math.max(rx, ry));
+      grd.addColorStop(0, 'rgba(8, 4, 18, 0.42)');
+      grd.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.ellipse(cx + ox, cy + oy, rx, ry, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // Status auras (drawn over mist so they remain visible)
     if (d.frozenUntil > t) {
       ctx.shadowBlur = 22; ctx.shadowColor = '#aaeeff';
       ctx.fillStyle = 'rgba(170, 230, 255, 0.18)';
@@ -1831,23 +1857,120 @@ function drawDummies(ctx) {
       ctx.beginPath(); ctx.ellipse(cx, cy, w, h*0.7, 0, 0, Math.PI*2); ctx.fill();
     }
 
-    // Cloak body
-    ctx.fillStyle = '#0a0810';
-    ctx.shadowBlur = 14; ctx.shadowColor = '#000';
+    // === Cloak silhouette with tattered, wavering hem ===
+    ctx.shadowBlur = 18;
+    ctx.shadowColor = '#000';
+    ctx.fillStyle = 'rgba(6, 4, 12, 0.92)';
     ctx.beginPath();
-    ctx.moveTo(cx - w/2, cy + h/2);
-    ctx.quadraticCurveTo(cx - w*0.7, cy, cx - w*0.4, cy - h*0.3);
-    // hood top
-    ctx.quadraticCurveTo(cx, cy - h*0.7, cx + w*0.4, cy - h*0.3);
-    ctx.quadraticCurveTo(cx + w*0.7, cy, cx + w/2, cy + h/2);
+
+    // Pointed hood top
+    const hoodPeakY = cy - h * 0.55;
+    const hoodSideY = cy - h * 0.30;
+    ctx.moveTo(cx - w * 0.42, hoodSideY);
+    ctx.quadraticCurveTo(cx - w * 0.18, cy - h * 0.62,
+                         cx,            hoodPeakY);
+    ctx.quadraticCurveTo(cx + w * 0.18, cy - h * 0.62,
+                         cx + w * 0.42, hoodSideY);
+
+    // Right shoulder out to mid-body, with wavering edge
+    const rightWaveSegs = 5;
+    for (let i = 1; i <= rightWaveSegs; i++) {
+      const f = i / rightWaveSegs;
+      const y = hoodSideY + (cy + h * 0.30 - hoodSideY) * f;
+      const baseX = cx + w * (0.42 + 0.18 * f);
+      const wave = Math.sin(t * 0.003 + d.tatterSeed + f * 4) * 4 * scale;
+      ctx.lineTo(baseX + wave, y);
+    }
+
+    // === Tattered bottom hem (jagged strips) ===
+    const tatters = 9;
+    const hemBaseY = cy + h * 0.30;
+    const tatterMaxLen = h * 0.32;
+    for (let i = 0; i <= tatters; i++) {
+      const f = i / tatters;
+      // Move from right edge inward
+      const px = cx + w * (0.60 - 1.20 * f);
+      // Each tatter has its own animated length
+      const tt = (Math.sin(t * 0.004 + d.tatterSeed * 7 + i * 0.9) + 1) * 0.5;
+      const len = tatterMaxLen * (0.45 + 0.55 * tt) * (0.7 + (i % 2) * 0.3);
+      const y = hemBaseY + len;
+      // Curve in/out so the tatters look like cloth, not zig-zag
+      const ctrlX = px + Math.sin(t * 0.005 + i) * 4;
+      const ctrlY = hemBaseY + len * 0.5;
+      ctx.quadraticCurveTo(ctrlX, ctrlY, px, y);
+      // Walk back up halfway to make a "strip"
+      if (i < tatters) {
+        const nx = cx + w * (0.60 - 1.20 * ((i + 0.5) / tatters));
+        ctx.quadraticCurveTo(nx, hemBaseY + len * 0.4, nx, hemBaseY);
+      }
+    }
+
+    // Left shoulder back up, mirror of right
+    for (let i = rightWaveSegs - 1; i >= 0; i--) {
+      const f = i / rightWaveSegs;
+      const y = hoodSideY + (cy + h * 0.30 - hoodSideY) * f;
+      const baseX = cx - w * (0.42 + 0.18 * f);
+      const wave = Math.sin(t * 0.003 + d.tatterSeed + f * 4 + 1.7) * 4 * scale;
+      ctx.lineTo(baseX + wave, y);
+    }
+
     ctx.closePath();
     ctx.fill();
 
-    // Hood interior shadow
-    ctx.fillStyle = '#000';
+    // Re-stroke for ragged darker outline
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // === Hood interior — deep void with hint of skull ===
+    const hoodCX = cx;
+    const hoodCY = cy - h * 0.18;
+    // Deep black void
+    const hoodGrd = ctx.createRadialGradient(hoodCX, hoodCY, 0, hoodCX, hoodCY, w * 0.34);
+    hoodGrd.addColorStop(0, 'rgba(0, 0, 0, 1)');
+    hoodGrd.addColorStop(0.7, 'rgba(0, 0, 0, 0.95)');
+    hoodGrd.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = hoodGrd;
     ctx.beginPath();
-    ctx.ellipse(cx, cy - h*0.25, w*0.3, h*0.18, 0, 0, Math.PI*2);
+    ctx.ellipse(hoodCX, hoodCY, w * 0.32, h * 0.18, 0, 0, Math.PI*2);
     ctx.fill();
+
+    // Faint cheekbones / jaw hint inside the hood
+    ctx.fillStyle = 'rgba(50, 35, 30, 0.18)';
+    ctx.beginPath();
+    ctx.ellipse(hoodCX - w * 0.10, hoodCY + h * 0.02, w * 0.06, h * 0.04, 0, 0, Math.PI*2);
+    ctx.ellipse(hoodCX + w * 0.10, hoodCY + h * 0.02, w * 0.06, h * 0.04, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // === Cold breath: tiny pale particles drifting downward from the hood ===
+    if (Math.random() < 0.5 && !d.frozenUntil > t) {
+      d.breathParticles.push({
+        x: hoodCX + (Math.random() - 0.5) * w * 0.15,
+        y: hoodCY + h * 0.05,
+        vx: (Math.random() - 0.5) * 0.3,
+        vy: 0.15 + Math.random() * 0.4,
+        life: 1
+      });
+    }
+    while (d.breathParticles.length > 22) d.breathParticles.shift();
+    for (const p of d.breathParticles) {
+      p.x += p.vx; p.y += p.vy;
+      p.vy += 0.005;
+      p.life -= 0.018;
+    }
+    ctx.shadowBlur = 4;
+    ctx.shadowColor = '#aaccee';
+    for (const p of d.breathParticles) {
+      if (p.life <= 0) continue;
+      ctx.globalAlpha = p.life * 0.55;
+      ctx.fillStyle = '#dde8ff';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.4 * p.life, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
 
     // glowing eyes
     ctx.shadowBlur = 10;
@@ -1863,8 +1986,8 @@ function drawDummies(ctx) {
     } else {
       ctx.shadowColor = '#ff4422'; ctx.fillStyle = '#ff6644';
     }
-    ctx.beginPath(); ctx.arc(cx - 8, cy - h*0.28, 2.5, 0, Math.PI*2); ctx.fill();
-    ctx.beginPath(); ctx.arc(cx + 8, cy - h*0.28, 2.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx - w*0.11, cy - h*0.20, 2.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + w*0.11, cy - h*0.20, 2.5, 0, Math.PI*2); ctx.fill();
 
     // Frozen overlay: ice crystals
     if (d.frozenUntil > t) {

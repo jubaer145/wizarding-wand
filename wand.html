@@ -750,7 +750,34 @@ function applySpellKick(name, def) {
   const k = SPELL_KICK[name] || { shake: 4, dur: 200, flashA: 0.2 };
   if (k.shake > 0) triggerShake(k.shake, k.dur);
   if (k.flashA > 0) triggerFlash(def.color, Math.max(160, k.dur), k.flashA);
+  // Duck ambient/music in proportion to spell power so the cast punches through
+  const duckStrength = Math.min(0.75, k.shake / 24 + 0.15);
+  duckAudio(duckStrength, Math.max(400, k.dur * 1.5));
   playSpellSound(name);
+}
+
+// Sidechain-style audio duck: ramp music + ambient gains down briefly so
+// spell sounds and impacts cut through the mix, then recover smoothly.
+function duckAudio(strength, recoverMs) {
+  if (!_audioCtx) return; // no audio context yet
+  const ctx = _audioCtx;
+  const t0 = ctx.currentTime;
+  const attack = 0.04; // 40ms duck-in
+  const recover = (recoverMs || 600) / 1000;
+  const factor = Math.max(0.05, 1 - Math.max(0, Math.min(1, strength)));
+
+  const ramp = (gainNode, normal, enabled) => {
+    if (!gainNode || !enabled) return;
+    const cur = gainNode.gain.value;
+    try {
+      gainNode.gain.cancelScheduledValues(t0);
+      gainNode.gain.setValueAtTime(cur, t0);
+      gainNode.gain.linearRampToValueAtTime(normal * factor, t0 + attack);
+      gainNode.gain.linearRampToValueAtTime(normal, t0 + attack + recover);
+    } catch(e) {}
+  };
+  ramp(state.musicMaster, 0.05, state.musicEnabled);
+  ramp(state.ambientGain, AMBIENT_VOLUME, state.ambientEnabled);
 }
 
 // =========================================================================
@@ -1302,6 +1329,7 @@ function killDummy(d, color, isAvada=false) {
     d.dyingDuration = 1100;
     triggerShake(22, 700);
     triggerFlash(color, 350, 0.7);
+    duckAudio(0.85, 1100);
     playImpactSound('avada kedavra');
     // Big radial shockwave
     state.effects.push({
@@ -1344,6 +1372,7 @@ function killDummy(d, color, isAvada=false) {
 
 function spawnImpact(x, y, color) {
   triggerShake(5, 180);
+  duckAudio(0.4, 350);
   playImpactSound('impact');
   state.effects.push({
     kind: 'shockwave', color, origin: { x, y },

@@ -114,8 +114,8 @@
   <div><span class="spell">Alohomora / Reparo</span> <span class="effect">— sparkle</span></div>
   <div style="margin-top:6px; color: #886; font-size: 10px; font-style: italic;">
     Speak the incantation, then flick to cast.<br>
-    <b>K</b> + drag base→tip aligns the wand.<br>
-    <b>M</b> toggles music. "Mischief Managed" clears all.
+    <b>K</b> drag base→tip aligns wand. <b>R</b> resets.<br>
+    <b>M</b> toggles music. "Mischief Managed" clears.
   </div>
 </div>
 <div id="heard"></div>
@@ -296,6 +296,13 @@ function keyPressed() {
     saveCal(); updateReachUI();
   } else if (key === 'k' || key === 'K') beginCalibration();
   else if (key === 'm' || key === 'M') toggleMusic();
+  else if (key === 'r' || key === 'R') resetCalibration();
+}
+function resetCalibration() {
+  WAND_BASE_REACH = 0; WAND_BASE_PERP = 0;
+  WAND_TIP_REACH = 1.2; WAND_TIP_PERP = 0;
+  saveCal(); updateReachUI();
+  setStatus('Calibration reset to defaults');
 }
 function updateReachUI() {
   const el = document.getElementById('reach');
@@ -338,6 +345,18 @@ function mouseDragged() {
   if (!state.calibrating || !state.calibrateDrag) return false;
   state.calibrateDrag.bx = mouseX;
   state.calibrateDrag.by = mouseY;
+  // Live preview: project endpoints into hand-local frame and update
+  // calibration in real-time so the user sees the rendered wand follow
+  // their drag. Values are saved on mouseReleased.
+  const baseLocal = projectToHandLocal(state.calibrateDrag.ax, state.calibrateDrag.ay);
+  const tipLocal  = projectToHandLocal(state.calibrateDrag.bx, state.calibrateDrag.by);
+  if (baseLocal && tipLocal) {
+    WAND_BASE_REACH = baseLocal.along;
+    WAND_BASE_PERP  = baseLocal.perp;
+    WAND_TIP_REACH  = tipLocal.along;
+    WAND_TIP_PERP   = tipLocal.perp;
+    updateReachUI();
+  }
   return false;
 }
 function mouseReleased() {
@@ -510,13 +529,19 @@ function hideArmed() {
 }
 
 function castInstant(name, def) {
-  if (def.type === 'lumos') state.lumosOn = true;
-  else if (def.type === 'nox') state.lumosOn = false;
+  if (def.type === 'lumos') {
+    state.lumosOn = true;
+    state.lumosUntil = millis() + 12000; // 12 second duration
+  } else if (def.type === 'nox') {
+    state.lumosOn = false;
+    state.lumosUntil = 0;
+  }
   else if (def.type === 'clear') {
     state.effects.length = 0;
     state.armedSpell = null;
     state.shield = null;
     state.lumosOn = false;
+    state.lumosUntil = 0;
     for (const d of state.dummies) {
       d.status = 'normal'; d.statusUntil = 0;
       d.health = d.maxHealth; d.alive = true;
@@ -955,29 +980,40 @@ function fireSpell(name, def) {
     case 'patronus': {
       // Random: stag (with antlers) or doe (no antlers)
       const variant = Math.random() < 0.5 ? 'stag' : 'doe';
-      // Build a graceful curving path for the patronus to follow.
-      // Start at the wand tip, head in the wand-pointing direction,
-      // curve across the screen, exit on the opposite side.
+      // Path stays inside the visible canvas. Deer launches in the wand
+      // direction, arcs gracefully through the upper-center area, and
+      // dissipates at a visible end-point — never goes off-screen.
       const startX = tip.x, startY = tip.y;
-      const baseDirX = dir.x, baseDirY = dir.y;
-      // Pick a curve target: cross to the far side with vertical sweep
-      const sideX = baseDirX > 0 ? width + 200 : -200;
-      const targetY = height * (0.3 + Math.random() * 0.4);
-      const ctrl1X = startX + baseDirX * 200 + (Math.random() - 0.5) * 200;
-      const ctrl1Y = startY + baseDirY * 200 - 200;
-      const ctrl2X = (startX + sideX) / 2 + (Math.random() - 0.5) * 100;
-      const ctrl2Y = targetY - 100 + Math.random() * 200;
+      const margin = Math.min(width, height) * 0.15;
+      // pick the side opposite the wand orientation to give a nice sweep
+      const sideSign = dir.x !== 0 ? Math.sign(dir.x) : (Math.random() < 0.5 ? -1 : 1);
+      // End at upper area on opposite side, fully inside viewport
+      const endX = clamp(width/2 - sideSign * (width*0.25 + Math.random()*width*0.1), margin, width - margin);
+      const endY = clamp(height * (0.25 + Math.random()*0.2), margin, height - margin);
+      // Mid-screen apex above the user, in viewport
+      const midApexY = clamp(height * 0.18 + Math.random()*40, margin, height*0.45);
+      const midApexX = clamp((startX + endX) / 2 + (Math.random()-0.5) * width * 0.15, margin, width - margin);
+      // Control points pull the curve through the apex
+      const ctrl1X = clamp(startX + dir.x * 220 + (Math.random()-0.5) * 80, margin, width - margin);
+      const ctrl1Y = clamp(startY + dir.y * 220 - 80, margin, height - margin);
+      const ctrl2X = clamp(midApexX + sideSign * 80, margin, width - margin);
+      const ctrl2Y = clamp(midApexY - 40, margin, height - margin);
       state.effects.push({
         kind: 'patronusAnimal', variant, color: '#e8f8ff',
-        bornAt: t, life: 6500,
-        path: { p0:{x:startX,y:startY}, c1:{x:ctrl1X,y:ctrl1Y}, c2:{x:ctrl2X,y:ctrl2Y}, p1:{x:sideX,y:targetY} },
+        bornAt: t, life: 7800,
+        path: {
+          p0: {x:startX, y:startY},
+          c1: {x:ctrl1X, y:ctrl1Y},
+          c2: {x:ctrl2X, y:ctrl2Y},
+          p1: {x:endX,   y:endY}
+        },
         animPhase: 0,
         wisps: [],
+        trail: [],   // motion-blur ghosts {x,y,dirX,dirY,age}
         lastPos: { x: startX, y: startY },
-        // burst at birth
-        birthBurst: Array.from({length: 30}, () => {
-          const a = Math.random() * Math.PI * 2; const s = 1 + Math.random()*4;
-          return { x: startX, y: startY, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: 1 };
+        birthBurst: Array.from({length: 50}, () => {
+          const a = Math.random() * Math.PI * 2; const s = 1 + Math.random()*5;
+          return { x: startX, y: startY, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: 1, size: 1 + Math.random()*2.5 };
         })
       });
       break;
@@ -1059,6 +1095,11 @@ function makeDummy() {
 
 function updateDummies() {
   const t = millis();
+  // Auto-extinguish Lumos
+  if (state.lumosOn && state.lumosUntil && t > state.lumosUntil) {
+    state.lumosOn = false;
+    state.lumosUntil = 0;
+  }
   // Lumos repels dementors: while Lumos is on and the wand is visible,
   // every dementor gets a continuous outward push from the wand tip.
   // Force is inverse-distance so close ones flee fast, far ones drift.
@@ -1315,33 +1356,42 @@ function updateEffects() {
         w.life -= 0.005;
       }
     } else if (e.kind === 'patronusAnimal') {
-      e.animPhase += 0.18;
-      // Spawn trailing wisps along the body each frame
-      const f = age / e.life;
-      const pos = bezierPoint(e.path, Math.min(0.99, f));
-      // 3 fresh wisps per frame
-      for (let k = 0; k < 3; k++) {
-        e.wisps.push({
-          x: pos.x + (Math.random()-0.5)*40,
-          y: pos.y + (Math.random()-0.5)*30,
-          vx: (Math.random()-0.5)*0.6,
-          vy: -0.4 - Math.random()*0.6,
-          life: 1, size: 1.5 + Math.random()*2
-        });
-      }
-      while (e.wisps.length > 240) e.wisps.shift();
+      e.animPhase += 0.22;
+      const fLin = age / e.life;
+      // Ease: slow start, slow end (deer pauses mid-screen for visibility)
+      // Smoothstep with a slight hold around 0.5
+      const f01 = Math.min(0.999, fLin);
+      const fEased = f01 * f01 * (3 - 2 * f01); // smoothstep
+      const t01 = fEased;
+      const pos = bezierPoint(e.path, t01);
+      const tan = bezierTangent(e.path, t01);
+      const size = Math.min(width, height) * 0.22;
+
+      // Edge wisps spawned along the body silhouette
+      spawnEdgeWisps(e, pos, tan.x, tan.y, size);
+
+      while (e.wisps.length > 360) e.wisps.shift();
       for (const w of e.wisps) {
         w.x += w.vx; w.y += w.vy;
         w.vy *= 0.99;
-        w.life -= 0.012;
+        w.life -= 0.014;
       }
+
+      // Motion-blur trail: store last position every frame, decay
+      e.trail.push({ x: pos.x, y: pos.y, dirX: tan.x, dirY: tan.y, age: 0, animPhase: e.animPhase });
+      if (e.trail.length > 6) e.trail.shift();
+      for (const tr of e.trail) tr.age += 1;
+
       e.lastPos = pos;
+      e.curPos = pos;
+      e.curDir = tan;
+      e.curSize = size;
       // Update birth burst
       if (e.birthBurst) {
         for (const p of e.birthBurst) {
           p.x += p.vx; p.y += p.vy;
           p.vx *= 0.93; p.vy *= 0.93;
-          p.life -= 0.025;
+          p.life -= 0.022;
         }
       }
     } else if (e.kind === 'sparkle' || e.kind === 'burst' || e.kind === 'particle') {
@@ -1645,6 +1695,8 @@ function drawDummies(ctx) {
   }
 }
 
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
 // Cubic Bézier evaluation
 function bezierPoint(path, t) {
   const u = 1 - t;
@@ -1662,111 +1714,195 @@ function bezierTangent(path, t) {
   return { x: dx / m, y: dy / m };
 }
 
-// Draw a stag/doe silhouette in glowing silver-white. The body is drawn in
-// a local frame oriented along (dirX, dirY) with origin at the chest center.
+// Build a Path2D for the deer body silhouette in unit local coords.
+// Origin = chest center. +X = forward (head direction). +Y = down.
+function buildDeerBodyPath() {
+  const p = new Path2D();
+  // Trace clockwise starting from rear haunch top
+  p.moveTo(-0.55, -0.18);
+  // Back, slight dip behind shoulder, up to neck base
+  p.bezierCurveTo(-0.35, -0.26, -0.10, -0.30, 0.18, -0.28);
+  p.bezierCurveTo(0.30, -0.27, 0.38, -0.30, 0.42, -0.32);
+  // Neck rising up-forward in graceful arch
+  p.bezierCurveTo(0.55, -0.45, 0.72, -0.62, 0.86, -0.74);
+  // Head top + crown
+  p.bezierCurveTo(0.92, -0.80, 0.99, -0.80, 1.04, -0.74);
+  // Forehead → muzzle ridge
+  p.bezierCurveTo(1.10, -0.70, 1.18, -0.68, 1.22, -0.62);
+  // Muzzle tip + bottom
+  p.bezierCurveTo(1.24, -0.58, 1.22, -0.55, 1.16, -0.55);
+  p.bezierCurveTo(1.10, -0.55, 1.05, -0.57, 1.00, -0.58);
+  // Throat curve down to chest
+  p.bezierCurveTo(0.92, -0.55, 0.85, -0.45, 0.78, -0.32);
+  // Chest front protrusion + foreleg shoulder
+  p.bezierCurveTo(0.70, -0.20, 0.55, -0.06, 0.42, 0.02);
+  // Belly under
+  p.bezierCurveTo(0.20, 0.10, -0.05, 0.12, -0.30, 0.10);
+  // Hind belly fold + haunch underside
+  p.bezierCurveTo(-0.46, 0.08, -0.55, 0.04, -0.62, -0.02);
+  // Rear haunch — bulging muscle
+  p.bezierCurveTo(-0.70, -0.10, -0.66, -0.16, -0.55, -0.18);
+  p.closePath();
+  return p;
+}
+// Cache — built once
+let _deerBodyPath = null;
+function deerBodyPath() { return _deerBodyPath || (_deerBodyPath = buildDeerBodyPath()); }
+
+// Photoreal-ish patronus: layered alpha passes + edge wisps + animated legs.
 function drawDeer(ctx, x, y, size, dirX, dirY, withAntlers, animPhase, alpha) {
   ctx.save();
   ctx.translate(x, y);
-  // Rotate local +X to face direction
-  const angle = Math.atan2(dirY, dirX);
-  ctx.rotate(angle);
+  ctx.rotate(Math.atan2(dirY, dirX));
   ctx.scale(size, size);
   ctx.globalAlpha = alpha;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
 
-  ctx.shadowBlur = 26 / size; ctx.shadowColor = '#c8e6ff';
-  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const body = deerBodyPath();
 
-  // Outer ethereal aura
+  // Pass 1: large soft halo behind everything
+  ctx.shadowBlur = 70 / size;
+  ctx.shadowColor = '#cce8ff';
   ctx.fillStyle = 'rgba(180, 220, 255, 0.18)';
-  ctx.beginPath(); ctx.ellipse(0, 0, 1.2, 0.6, 0, 0, Math.PI*2); ctx.fill();
-
-  // Body (oval)
-  ctx.fillStyle = 'rgba(220, 240, 255, 0.85)';
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-  ctx.lineWidth = 0.04;
-  ctx.beginPath(); ctx.ellipse(0, 0, 0.55, 0.28, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-
-  // Tail
   ctx.beginPath();
-  ctx.moveTo(-0.55, -0.05);
-  ctx.lineTo(-0.75, -0.18);
-  ctx.lineTo(-0.7, -0.05);
-  ctx.closePath(); ctx.fill();
+  ctx.ellipse(0, -0.15, 1.55, 0.85, 0, 0, Math.PI*2);
+  ctx.fill();
 
-  // Neck — curving up-forward from chest
-  ctx.lineWidth = 0.18;
-  ctx.beginPath();
-  ctx.moveTo(0.4, -0.1);
-  ctx.quadraticCurveTo(0.7, -0.4, 0.85, -0.55);
-  ctx.stroke();
+  // Pass 2: filled body — layered translucent silver
+  ctx.shadowBlur = 24 / size;
+  ctx.shadowColor = '#ffffff';
+  ctx.fillStyle = 'rgba(225, 240, 255, 0.45)';
+  ctx.fill(body);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.30)';
+  ctx.fill(body);
 
-  // Head
-  ctx.fillStyle = 'rgba(230, 245, 255, 0.95)';
-  ctx.beginPath(); ctx.ellipse(0.92, -0.62, 0.16, 0.1, 0.2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-  // Snout extension
-  ctx.beginPath();
-  ctx.moveTo(1.02, -0.6);
-  ctx.lineTo(1.14, -0.58);
-  ctx.lineTo(1.04, -0.52);
-  ctx.closePath(); ctx.fill();
+  // Pass 3: edge highlight stroke
+  ctx.shadowBlur = 12 / size;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
+  ctx.lineWidth = 0.022;
+  ctx.stroke(body);
+  ctx.strokeStyle = 'rgba(220, 240, 255, 0.55)';
+  ctx.lineWidth = 0.05;
+  ctx.stroke(body);
 
-  // Eye spark
-  ctx.fillStyle = 'rgba(255, 255, 255, 1)';
-  ctx.beginPath(); ctx.arc(0.94, -0.66, 0.018, 0, Math.PI*2); ctx.fill();
+  // Eye
+  ctx.shadowBlur = 6 / size;
+  ctx.fillStyle = 'rgba(35, 40, 55, 0.85)';
+  ctx.beginPath(); ctx.arc(1.12, -0.66, 0.022, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+  ctx.beginPath(); ctx.arc(1.125, -0.668, 0.009, 0, Math.PI*2); ctx.fill();
 
-  // Antlers — only for stag
-  if (withAntlers) {
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-    ctx.lineWidth = 0.05;
-    // main beam
-    const drawAntler = (sideY) => {
-      ctx.beginPath();
-      ctx.moveTo(0.88, -0.7);
-      ctx.lineTo(0.95 + sideY*0.0, -1.0);
-      ctx.lineTo(1.05 + sideY*0.02, -1.18);
-      ctx.stroke();
-      // tines
-      ctx.beginPath();
-      ctx.moveTo(0.95, -0.92); ctx.lineTo(0.78 + sideY*-0.05, -1.05); ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(1.0, -1.05); ctx.lineTo(1.18, -1.16); ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(1.05, -1.18); ctx.lineTo(0.92 + sideY*-0.04, -1.32); ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(1.05, -1.18); ctx.lineTo(1.18, -1.30); ctx.stroke();
-    };
-    // two slightly offset antlers for depth
-    drawAntler(0);
-    ctx.globalAlpha = alpha * 0.7;
-    drawAntler(0.05);
-    ctx.globalAlpha = alpha;
-  }
+  // Inner core glow — subtle along the spine
+  ctx.shadowBlur = 0;
+  const spineGrad = ctx.createLinearGradient(-0.5, -0.2, 1.0, -0.6);
+  spineGrad.addColorStop(0, 'rgba(255,255,255,0.0)');
+  spineGrad.addColorStop(0.5, 'rgba(255,255,255,0.25)');
+  spineGrad.addColorStop(1, 'rgba(255,255,255,0.0)');
+  ctx.fillStyle = spineGrad;
+  ctx.fill(body);
 
-  // Legs — animated gallop cycle (4 legs phased)
-  ctx.strokeStyle = 'rgba(220, 240, 255, 0.9)';
-  ctx.lineWidth = 0.06;
-  const phases = [0, Math.PI*0.6, Math.PI, Math.PI*1.6];
-  const legAnchors = [
-    { x:  0.35, y: 0.12 },  // front near
-    { x:  0.30, y: 0.16 },  // front far
-    { x: -0.28, y: 0.12 },  // hind near
-    { x: -0.33, y: 0.16 }   // hind far
+  // Legs — gallop cycle (left/right pairs alternating)
+  ctx.strokeStyle = 'rgba(230, 245, 255, 0.92)';
+  ctx.lineWidth = 0.052;
+  const legPhases = [0, Math.PI*0.85, Math.PI*1.05, Math.PI*1.9];
+  const legs = [
+    { x:  0.42, y: 0.02, far: false },  // foreleg near
+    { x:  0.36, y: 0.04, far: true  },  // foreleg far
+    { x: -0.32, y: 0.04, far: false },  // hindleg near
+    { x: -0.38, y: 0.06, far: true  }   // hindleg far
   ];
-  for (let i = 0; i < 4; i++) {
-    const a = legAnchors[i];
-    const swing = Math.sin(animPhase + phases[i]) * 0.18;
-    const lift  = Math.max(0, Math.sin(animPhase + phases[i])) * 0.1;
-    const kneeX = a.x + swing * 0.6;
-    const kneeY = a.y + 0.18 - lift;
-    const footX = a.x + swing;
-    const footY = a.y + 0.36 - lift * 0.4;
+  for (let i = 0; i < legs.length; i++) {
+    const a = legs[i];
+    const p = animPhase + legPhases[i];
+    const swing = Math.sin(p) * 0.26;
+    const lift = Math.max(0, Math.sin(p)) * 0.14;
+    const kneeX = a.x + swing * 0.45;
+    const kneeY = a.y + 0.22 - lift * 0.4;
+    const hoofX = a.x + swing;
+    const hoofY = a.y + 0.46 - lift;
+    ctx.globalAlpha = alpha * (a.far ? 0.6 : 1);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
-    ctx.quadraticCurveTo(kneeX, kneeY, footX, footY);
+    ctx.quadraticCurveTo(kneeX, kneeY, hoofX, hoofY);
     ctx.stroke();
+  }
+  ctx.globalAlpha = alpha;
+
+  // Tail
+  ctx.lineWidth = 0.04;
+  ctx.beginPath();
+  ctx.moveTo(-0.62, -0.02);
+  const tailWag = Math.sin(animPhase * 1.4) * 0.05;
+  ctx.quadraticCurveTo(-0.74, -0.18 + tailWag, -0.7, -0.26);
+  ctx.stroke();
+
+  // Antlers — only for stag, drawn in two layers for depth
+  if (withAntlers) {
+    ctx.shadowBlur = 16 / size;
+    ctx.shadowColor = '#ffffff';
+    ctx.lineCap = 'round';
+    const drawAntlerSet = (offX) => {
+      ctx.lineWidth = 0.04;
+      ctx.strokeStyle = 'rgba(245, 252, 255, 0.92)';
+      // Main beam: head crown → up and slightly back, with curve
+      ctx.beginPath();
+      ctx.moveTo(0.95 + offX, -0.78);
+      ctx.bezierCurveTo(0.93 + offX, -0.95, 0.97 + offX, -1.10, 1.02 + offX, -1.22);
+      ctx.stroke();
+      // Brow tine (forward, low)
+      ctx.beginPath();
+      ctx.moveTo(0.95 + offX, -0.84); ctx.quadraticCurveTo(1.10 + offX, -0.92, 1.22 + offX, -0.94);
+      ctx.stroke();
+      // Bez tine (forward, mid)
+      ctx.beginPath();
+      ctx.moveTo(0.96 + offX, -0.96); ctx.quadraticCurveTo(1.14 + offX, -1.02, 1.28 + offX, -1.05);
+      ctx.stroke();
+      // Trez tine (backward, mid)
+      ctx.beginPath();
+      ctx.moveTo(0.94 + offX, -1.02); ctx.quadraticCurveTo(0.78 + offX, -1.10, 0.66 + offX, -1.16);
+      ctx.stroke();
+      // Crown tines (top branching)
+      ctx.beginPath();
+      ctx.moveTo(1.02 + offX, -1.22);
+      ctx.lineTo(0.92 + offX, -1.36);
+      ctx.moveTo(1.02 + offX, -1.22);
+      ctx.lineTo(1.10 + offX, -1.38);
+      ctx.moveTo(1.02 + offX, -1.22);
+      ctx.lineTo(1.18 + offX, -1.30);
+      ctx.stroke();
+    };
+    // Far antler (slightly offset, dimmer)
+    ctx.globalAlpha = alpha * 0.5;
+    drawAntlerSet(-0.04);
+    // Near antler (full alpha)
+    ctx.globalAlpha = alpha;
+    drawAntlerSet(0.02);
   }
 
   ctx.restore();
+}
+
+// Spawn 'fur' wisp particles along the deer's silhouette edges so it reads
+// as "made of light" rather than a hard outline.
+function spawnEdgeWisps(e, pos, dirX, dirY, size) {
+  // Sample N points around the body and emit small particles
+  const N = 4;
+  const angle = Math.atan2(dirY, dirX);
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  for (let i = 0; i < N; i++) {
+    // Random sample inside body bbox in local coords
+    const lx = -0.6 + Math.random() * 1.7;
+    const ly = -0.7 + Math.random() * 1.0;
+    const wx = pos.x + (lx * cos - ly * sin) * size;
+    const wy = pos.y + (lx * sin + ly * cos) * size;
+    e.wisps.push({
+      x: wx, y: wy,
+      vx: (Math.random() - 0.5) * 0.4,
+      vy: -0.2 - Math.random() * 0.5,
+      life: 1, size: 1 + Math.random() * 2
+    });
+  }
 }
 
 function drawEffects(ctx) {
@@ -1899,45 +2035,67 @@ function drawEffects(ctx) {
       }
     } else if (e.kind === 'patronusAnimal') {
       const f = age / e.life;
-      const t01 = Math.min(0.99, f);
-      const pos = bezierPoint(e.path, t01);
-      const tan = bezierTangent(e.path, t01);
 
-      // Wisp trail
+      // Use the eased current position from updateEffects
+      const pos = e.curPos || bezierPoint(e.path, Math.min(0.99, f));
+      const tan = e.curDir || bezierTangent(e.path, Math.min(0.99, f));
+      const size = e.curSize || (Math.min(width, height) * 0.22);
+
+      // Switch to additive blending for ethereal "made of light" feel
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+
+      // === Wisp aura behind everything ===
       for (const w of e.wisps) {
         if (w.life <= 0) continue;
         ctx.shadowBlur = 18; ctx.shadowColor = '#cce8ff';
-        ctx.globalAlpha = w.life * 0.85;
-        ctx.fillStyle = '#ffffff';
-        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life, 0, Math.PI*2); ctx.fill();
-        ctx.fillStyle = '#9fc8ff'; ctx.shadowColor = '#88bbff';
-        ctx.globalAlpha = w.life * 0.35;
-        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life * 1.8, 0, Math.PI*2); ctx.fill();
+        ctx.globalAlpha = w.life * 0.55;
+        ctx.fillStyle = '#9fc8ff';
+        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life * 2.4, 0, Math.PI*2); ctx.fill();
       }
       ctx.globalAlpha = 1;
 
-      // Birth burst at the wand tip (first ~700ms)
+      // === Motion-blur trail: ghosts of recent positions ===
+      if (e.trail && e.trail.length > 1) {
+        for (let ti = 0; ti < e.trail.length - 1; ti++) {
+          const tr = e.trail[ti];
+          const ghostAlpha = (ti / e.trail.length) * 0.18;
+          if (ghostAlpha < 0.01) continue;
+          drawDeer(ctx, tr.x, tr.y, size, tr.dirX, tr.dirY,
+                   e.variant === 'stag', tr.animPhase, ghostAlpha);
+        }
+      }
+
+      // === Birth burst (concentrated white flash near origin) ===
       if (e.birthBurst) {
         for (const p of e.birthBurst) {
           if (p.life <= 0) continue;
-          ctx.shadowBlur = 16; ctx.shadowColor = '#cce8ff';
+          ctx.shadowBlur = 22; ctx.shadowColor = '#ffffff';
           ctx.fillStyle = '#ffffff';
-          ctx.globalAlpha = p.life * 0.9;
-          ctx.beginPath(); ctx.arc(p.x, p.y, 2 + p.life * 2, 0, Math.PI*2); ctx.fill();
+          ctx.globalAlpha = p.life * 0.95;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI*2); ctx.fill();
         }
         ctx.globalAlpha = 1;
       }
 
-      // The animal itself: fade in over first 12%, fade out over last 15%
-      let alpha = 1;
-      if (f < 0.12) alpha = f / 0.12;
-      else if (f > 0.85) alpha = (1 - f) / 0.15;
-      alpha = Math.max(0, Math.min(1, alpha));
+      // === The deer itself ===
+      let mainAlpha = 1;
+      if (f < 0.10) mainAlpha = f / 0.10;
+      else if (f > 0.85) mainAlpha = (1 - f) / 0.15;
+      mainAlpha = Math.max(0, Math.min(1, mainAlpha));
+      drawDeer(ctx, pos.x, pos.y, size, tan.x, tan.y,
+               e.variant === 'stag', e.animPhase, mainAlpha);
 
-      // Size scales slightly with viewport
-      const size = Math.min(width, height) * 0.18;
-      drawDeer(ctx, pos.x, pos.y, size, tan.x, tan.y, e.variant === 'stag', e.animPhase, alpha);
+      // === Bright sharp wisps in front (over deer) ===
+      for (const w of e.wisps) {
+        if (w.life <= 0) continue;
+        ctx.shadowBlur = 14; ctx.shadowColor = '#ffffff';
+        ctx.globalAlpha = w.life * 0.85;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life, 0, Math.PI*2); ctx.fill();
+      }
       ctx.globalAlpha = 1;
+      ctx.restore();
     } else if (e.kind === 'sparkle' || e.kind === 'burst' || e.kind === 'particle') {
       for (const p of e.particles) {
         if (p.life <= 0) continue;
@@ -2030,12 +2188,18 @@ function drawWand(ctx) {
 
   // Wand tip glow (Lumos OR armed-spell charging OR generic faint)
   let glowColor = null, glowStrength = 0;
+  // Lumos fades in last 1.5 seconds before extinguishing
+  let lumosFade = 0;
+  if (state.lumosOn && state.lumosUntil) {
+    const remaining = state.lumosUntil - t;
+    lumosFade = remaining < 1500 ? Math.max(0, remaining) / 1500 : 1;
+  }
   if (state.armedSpell) {
     glowColor = SPELLS[state.armedSpell].color;
     glowStrength = state.spellCharge;
   } else if (state.lumosOn) {
     glowColor = '#fff2c0';
-    glowStrength = 1;
+    glowStrength = lumosFade;
   } else {
     glowColor = '#ffcc66';
     glowStrength = 0.15;
@@ -2057,15 +2221,27 @@ function drawWand(ctx) {
   ctx.arc(state.wandTip.x, state.wandTip.y, Math.max(2, r * 0.3), 0, Math.PI*2);
   ctx.fill();
 
-  // Lumos cone
+  // Lumos cone — fades with timer
   if (state.lumosOn) {
+    const lf = lumosFade;
     const grd = ctx.createRadialGradient(state.wandTip.x, state.wandTip.y, 0, state.wandTip.x, state.wandTip.y, 320);
-    grd.addColorStop(0, 'rgba(255, 240, 200, 0.55)');
-    grd.addColorStop(0.5, 'rgba(255, 220, 150, 0.18)');
+    grd.addColorStop(0, `rgba(255, 240, 200, ${0.55 * lf})`);
+    grd.addColorStop(0.5, `rgba(255, 220, 150, ${0.18 * lf})`);
     grd.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.globalAlpha = 1;
     ctx.fillStyle = grd;
     ctx.fillRect(state.wandTip.x - 320, state.wandTip.y - 320, 640, 640);
+
+    // Tiny remaining-time arc near the tip
+    const rem = (state.lumosUntil - t) / 12000;
+    if (rem > 0 && rem < 1) {
+      ctx.shadowBlur = 0; ctx.globalAlpha = 0.7;
+      ctx.strokeStyle = 'rgba(255, 240, 180, 0.7)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(state.wandTip.x, state.wandTip.y, 22, -Math.PI/2, -Math.PI/2 + rem * Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
   ctx.globalAlpha = 1;

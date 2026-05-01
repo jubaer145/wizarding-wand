@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Air Theremin — Neon Hands</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #05060f; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #0ff; }
+  #status {
+    position: fixed; top: 12px; left: 12px; z-index: 10;
+    padding: 6px 10px; background: rgba(0,0,0,0.55);
+    border: 1px solid #0ff5; border-radius: 6px;
+    font-size: 12px; letter-spacing: 1px; text-transform: uppercase;
+    color: #0ff; text-shadow: 0 0 6px #0ff; pointer-events: none;
+  }
+  #hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 10; padding: 8px 14px; background: rgba(0,0,0,0.6);
+    border: 1px solid #ff31d266; border-radius: 6px;
+    font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: #ff31d2; text-shadow: 0 0 8px #ff31d2; pointer-events: none;
+  }
+  #readout {
+    position: fixed; top: 12px; right: 12px; z-index: 10;
+    padding: 8px 12px; background: rgba(0,0,0,0.55);
+    border: 1px solid #fff20055; border-radius: 6px;
+    font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+    color: #fff200; text-shadow: 0 0 6px #fff20088;
+    min-width: 160px; pointer-events: none;
+  }
+  canvas { display: block; }
+  video { display: none !important; }
+  #startBtn {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    z-index: 20; padding: 18px 32px; font-size: 16px; letter-spacing: 3px;
+    background: rgba(0,0,0,0.7); color: #0ff; border: 2px solid #0ff;
+    border-radius: 8px; cursor: pointer; text-transform: uppercase;
+    text-shadow: 0 0 10px #0ff; box-shadow: 0 0 30px #0ff5;
+    font-family: inherit;
+  }
+  #startBtn:hover { background: #0ff2; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="status">Initializing camera…</div>
+<div id="readout">Pitch: — Hz<br>Volume: 0%</div>
+<div id="hint">Right hand → Pitch  •  Left hand → Volume  •  Pinch to mute</div>
+<button id="startBtn">Tap to Begin</button>
+
+<script>
+  // ---------- Globals ----------
+  let videoEl;
+  let latestResults = null;
+  let camReady = false;
+
+  // Audio
+  let audioCtx = null;
+  let osc = null;
+  let gainNode = null;
+  let filterNode = null;
+  let lfo = null;
+  let lfoGain = null;
+  let audioStarted = false;
+
+  // Smoothed values
+  let smoothedPitch = 220;
+  let smoothedVolume = 0;
+  let smoothedFilter = 1200;
+
+  // Trail of recent fingertip positions for visual flair
+  const pitchTrail = [];
+  const volumeTrail = [];
+  const TRAIL_LEN = 40;
+
+  // Pitch / volume range
+  const PITCH_MIN = 110;   // A2
+  const PITCH_MAX = 880;   // A5
+  const VOL_MAX   = 0.35;
+
+  // ---------- p5 ----------
+  function setup() {
+    pixelDensity(1);
+    createCanvas(windowWidth, windowHeight);
+    frameRate(60);
+    setStatus('Tap "Begin" to enable audio');
+    document.getElementById('startBtn').addEventListener('click', startEverything);
+  }
+  function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+  function setStatus(m) { const e = document.getElementById('status'); if (e) e.textContent = m; }
+
+  function startEverything() {
+    document.getElementById('startBtn').remove();
+    initAudio();
+    initMediaPipe();
+    setStatus('Requesting camera permission…');
+  }
+
+  // ---------- Audio ----------
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Oscillator with a soft sawtooth + lowpass filter for warmth
+    osc = audioCtx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = 220;
+
+    filterNode = audioCtx.createBiquadFilter();
+    filterNode.type = 'lowpass';
+    filterNode.frequency.value = 1200;
+    filterNode.Q.value = 6;
+
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = 0;
+
+    // LFO for vibrato (5 Hz, depth ~4 cents)
+    lfo = audioCtx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 5;
+    lfoGain = audioCtx.createGain();
+    lfoGain.gain.value = 3; // Hz vibrato depth
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+
+    osc.connect(filterNode);
+    filterNode.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    osc.start();
+    lfo.start();
+    audioStarted = true;
+  }
+
+  // ---------- MediaPipe ----------
+  function initMediaPipe() {
+    videoEl = document.createElement('video');
+    videoEl.setAttribute('playsinline', '');
+    videoEl.muted = true;
+    document.body.appendChild(videoEl);
+
+    const hands = new Hands({
+      locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+    });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.5
+    });
+    hands.onResults((r) => {
+      latestResults = r;
+      if (!camReady) { camReady = true; setStatus('Tracking — show both hands'); }
+    });
+    const cam = new Camera(videoEl, {
+      onFrame: async () => { await hands.send({ image: videoEl }); },
+      width: 1280, height: 720
+    });
+    cam.start().catch(e => setStatus('Camera error: ' + e.message));
+  }
+
+  // ---------- Helpers ----------
+  function projectHands(results) {
+    if (!results.multiHandLandmarks) return [];
+    const handed = results.multiHandedness || [];
+    return results.multiHandLandmarks.map((lm, i) => ({
+      label: handed[i] ? handed[i].label : (i === 0 ? 'Right' : 'Left'),
+      points: lm.map(p => ({ x: (1 - p.x) * width, y: p.y * height, z: p.z }))
+    }));
+  }
+
+  function classifyHands(projected) {
+    let leftHand = null, rightHand = null;
+    for (const h of projected) {
+      // mirrored: MediaPipe "Left" is user's right, vice versa
+      if (h.label === 'Left') rightHand = h;
+      else if (h.label === 'Right') leftHand = h;
+    }
+    if (!leftHand && !rightHand && projected.length >= 2) {
+      const sorted = [...projected].sort((a,b) => a.points[0].x - b.points[0].x);
+      leftHand = sorted[0]; rightHand = sorted[1];
+    }
+    return { leftHand, rightHand };
+  }
+
+  function pinchAmount(pts) {
+    const a = pts[4], b = pts[8];
+    const palm = pts[0], mid = pts[9];
+    const handSize = Math.hypot(palm.x - mid.x, palm.y - mid.y) + 1e-3;
+    return Math.hypot(a.x - b.x, a.y - b.y) / handSize;
+  }
+
+  // ---------- Draw ----------
+  function draw() {
+    const ctx = drawingContext;
+
+    // Deep midnight gradient bg
+    const g = ctx.createLinearGradient(0, 0, 0, height);
+    g.addColorStop(0, '#070318');
+    g.addColorStop(1, '#01010a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, width, height);
+
+    // Faint scanlines
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    ctx.fillStyle = '#0ff';
+    for (let y = 0; y < height; y += 3) ctx.fillRect(0, y, width, 1);
+    ctx.restore();
+
+    // Side guides: left = volume column, right = pitch column
+    drawGuides(ctx);
+
+    if (!latestResults) return;
+    const projected = projectHands(latestResults);
+    const { leftHand, rightHand } = classifyHands(projected);
+
+    // PITCH — right hand (user's right) controls Y → frequency
+    let targetPitch = smoothedPitch;
+    let targetVol = 0;
+    let targetFilter = smoothedFilter;
+    let pitchTipPos = null;
+    let volTipPos = null;
+    let muted = false;
+
+    if (rightHand) {
+      const tip = rightHand.points[8]; // index fingertip
+      const yN = constrain(1 - tip.y / height, 0, 1); // top of screen = high pitch
+      // Exponential mapping for musical feel
+      targetPitch = PITCH_MIN * Math.pow(PITCH_MAX / PITCH_MIN, yN);
+      targetFilter = lerp(400, 4000, yN);
+      pitchTipPos = tip;
+
+      // Pinch on right hand mutes
+      if (pinchAmount(rightHand.points) < 0.45) muted = true;
+    }
+
+    if (leftHand) {
+      const tip = leftHand.points[8];
+      const yN = constrain(1 - tip.y / height, 0, 1);
+      targetVol = yN * VOL_MAX;
+      volTipPos = tip;
+
+      if (pinchAmount(leftHand.points) < 0.45) muted = true;
+    }
+
+    if (muted) targetVol = 0;
+
+    // Smooth values toward targets (low-pass)
+    smoothedPitch += (targetPitch - smoothedPitch) * 0.18;
+    smoothedVolume += (targetVol - smoothedVolume) * 0.12;
+    smoothedFilter += (targetFilter - smoothedFilter) * 0.15;
+
+    // Apply to audio
+    if (audioStarted && osc) {
+      const t = audioCtx.currentTime;
+      osc.frequency.setTargetAtTime(smoothedPitch, t, 0.02);
+      gainNode.gain.setTargetAtTime(smoothedVolume, t, 0.03);
+      filterNode.frequency.setTargetAtTime(smoothedFilter, t, 0.05);
+    }
+
+    // Trails
+    if (pitchTipPos) {
+      pitchTrail.push({ x: pitchTipPos.x, y: pitchTipPos.y });
+      if (pitchTrail.length > TRAIL_LEN) pitchTrail.shift();
+    }
+    if (volTipPos) {
+      volumeTrail.push({ x: volTipPos.x, y: volTipPos.y });
+      if (volumeTrail.length > TRAIL_LEN) volumeTrail.shift();
+    }
+
+    // Draw hand silhouettes (no video, just dots/skeleton)
+    for (const h of projected) drawHand(ctx, h.points, h === rightHand ? '#fff200' : '#ff31d2');
+
+    // Trails as glowing comet tails
+    drawTrail(ctx, pitchTrail, '#fff200');
+    drawTrail(ctx, volumeTrail, '#ff31d2');
+
+    // Sound waves emanating from pitch tip
+    if (pitchTipPos && smoothedVolume > 0.005) {
+      drawSoundWaves(ctx, pitchTipPos, smoothedPitch, smoothedVolume);
+    }
+
+    // Mute overlay
+    if (muted) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(255, 49, 210, 0.08)';
+      ctx.fillRect(0, 0, width, height);
+      ctx.font = 'bold 48px monospace';
+      ctx.fillStyle = '#ff31d2';
+      ctx.shadowBlur = 24;
+      ctx.shadowColor = '#ff31d2';
+      ctx.textAlign = 'center';
+      ctx.fillText('MUTE', width/2, height/2);
+      ctx.restore();
+    }
+
+    // Readout
+    const r = document.getElementById('readout');
+    if (r) {
+      const pitchHz = smoothedPitch.toFixed(1);
+      const note = freqToNote(smoothedPitch);
+      const volPct = Math.round((smoothedVolume / VOL_MAX) * 100);
+      r.innerHTML = `Pitch: ${pitchHz} Hz (${note})<br>Volume: ${volPct}%${muted ? '  ⏸' : ''}`;
+    }
+  }
+
+  function drawGuides(ctx) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 49, 210, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(width * 0.25, 0); ctx.lineTo(width * 0.25, height); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255, 242, 0, 0.18)';
+    ctx.beginPath(); ctx.moveTo(width * 0.75, 0); ctx.lineTo(width * 0.75, height); ctx.stroke();
+
+    // Note ticks on right column
+    ctx.fillStyle = 'rgba(255, 242, 0, 0.5)';
+    ctx.font = '10px monospace';
+    const notes = [['A2',110],['A3',220],['A4',440],['A5',880]];
+    for (const [name, hz] of notes) {
+      const yN = Math.log(hz / PITCH_MIN) / Math.log(PITCH_MAX / PITCH_MIN);
+      const y = (1 - yN) * height;
+      ctx.fillRect(width * 0.75 - 6, y, 12, 1);
+      ctx.fillText(name, width * 0.75 + 10, y + 4);
+    }
+
+    // Volume ticks on left column
+    ctx.fillStyle = 'rgba(255, 49, 210, 0.5)';
+    for (let i = 0; i <= 4; i++) {
+      const y = height - (i / 4) * height;
+      ctx.fillRect(width * 0.25 - 6, y, 12, 1);
+      ctx.fillText(`${i * 25}%`, width * 0.25 - 50, y + 4);
+    }
+    ctx.restore();
+  }
+
+  function drawHand(ctx, pts, accent) {
+    const CONN = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [5,9],[9,10],[10,11],[11,12],
+      [9,13],[13,14],[14,15],[15,16],
+      [13,17],[17,18],[18,19],[19,20],
+      [0,17]
+    ];
+    ctx.save();
+    ctx.shadowBlur = 12; ctx.shadowColor = '#00ffff';
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.55)';
+    ctx.lineWidth = 1.4; ctx.lineCap = 'round';
+    for (const [a,b] of CONN) {
+      ctx.beginPath();
+      ctx.moveTo(pts[a].x, pts[a].y);
+      ctx.lineTo(pts[b].x, pts[b].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+    const TIPS = [4,8,12,16,20];
+    for (let i = 0; i < pts.length; i++) {
+      const isTip = TIPS.includes(i);
+      const isIndex = i === 8;
+      const color = isIndex ? accent : (isTip ? '#ff31d2' : '#00ffff');
+      const r = isIndex ? 10 : (isTip ? 7 : 4);
+      ctx.save();
+      ctx.shadowBlur = isIndex ? 30 : 16;
+      ctx.shadowColor = color;
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(pts[i].x, pts[i].y, r, 0, Math.PI*2); ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.beginPath(); ctx.arc(pts[i].x, pts[i].y, r * 0.35, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawTrail(ctx, trail, color) {
+    if (trail.length < 2) return;
+    ctx.save();
+    ctx.shadowBlur = 18; ctx.shadowColor = color; ctx.strokeStyle = color;
+    ctx.lineCap = 'round';
+    for (let i = 1; i < trail.length; i++) {
+      const a = trail[i-1], b = trail[i];
+      const t = i / trail.length;
+      ctx.globalAlpha = t * 0.7;
+      ctx.lineWidth = 1 + t * 4;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawSoundWaves(ctx, src, freq, vol) {
+    const t = millis() * 0.001;
+    const ringCount = 4;
+    ctx.save();
+    ctx.shadowBlur = 14; ctx.shadowColor = '#fff200';
+    ctx.strokeStyle = '#fff200';
+    for (let i = 0; i < ringCount; i++) {
+      const phase = (t * (freq * 0.004) + i / ringCount) % 1;
+      const radius = phase * 240;
+      ctx.globalAlpha = (1 - phase) * 0.6 * (vol / VOL_MAX);
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(src.x, src.y, radius, 0, Math.PI*2); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function freqToNote(hz) {
+    const NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+    const name = NAMES[((midi % 12) + 12) % 12];
+    const oct = Math.floor(midi / 12) - 1;
+    return name + oct;
+  }
+</script>
+</body>
+</html>

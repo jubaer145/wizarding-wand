@@ -94,6 +94,13 @@
 <body>
 <div id="status">Awakening the wand…</div>
 <div id="reach" style="position:fixed; top:38px; left:12px; z-index:10; padding:4px 10px; background:rgba(0,0,0,0.55); border:1px solid rgba(232,216,160,0.3); border-radius:4px; font-size:10px; letter-spacing:1px; color:#c8b878; font-family:monospace; pointer-events:none;">Wand reach: 1.2× ([ / ])</div>
+<div id="ambient" style="position:fixed; top:64px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(150,200,255,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#aabbff; font-family:monospace; cursor:pointer;" title="Click to load an audio file. Drop one anywhere on the page. Press A to toggle.">
+  Drop ambient sound here  ·  click to choose
+</div>
+<input type="file" id="ambientFile" accept="audio/*" style="display:none;">
+<div id="dropOverlay" style="position:fixed; inset:0; z-index:40; background:rgba(0,40,80,0.4); border:6px dashed rgba(170,210,255,0.8); display:none; align-items:center; justify-content:center; pointer-events:none;">
+  <div style="font-size:22px; color:#cce8ff; letter-spacing:4px; text-shadow:0 0 12px #88aaff; font-family:monospace;">DROP AUDIO TO PLAY AS AMBIENT</div>
+</div>
 <div id="spellbook">
   <h3>SPELLBOOK</h3>
   <div><span class="spell">Avada Kedavra</span> <span class="effect">— killing curse</span></div>
@@ -115,7 +122,7 @@
   <div style="margin-top:6px; color: #886; font-size: 10px; font-style: italic;">
     Speak the incantation, then flick to cast.<br>
     <b>K</b> drag base→tip aligns wand. <b>R</b> resets.<br>
-    <b>M</b> toggles music. "Mischief Managed" clears.
+    <b>M</b> music · <b>A</b> ambient · "Mischief Managed" clears.
   </div>
 </div>
 <div id="heard"></div>
@@ -283,6 +290,7 @@ function setup() {
   document.getElementById('startBtn').addEventListener('click', begin);
   setStatus('Click the button to begin');
   updateReachUI();
+  wireAmbientUI();
 }
 
 function keyPressed() {
@@ -296,6 +304,7 @@ function keyPressed() {
     saveCal(); updateReachUI();
   } else if (key === 'k' || key === 'K') beginCalibration();
   else if (key === 'm' || key === 'M') toggleMusic();
+  else if (key === 'a' || key === 'A') toggleAmbient();
   else if (key === 'r' || key === 'R') resetCalibration();
 }
 function resetCalibration() {
@@ -829,6 +838,103 @@ function toggleMusic() {
     );
   }
   setStatus(state.musicEnabled ? 'Music on' : 'Music muted');
+}
+
+// =========================================================================
+// AMBIENT — user-loaded real audio file looped softly under everything.
+// =========================================================================
+state.ambientEnabled = true;
+state.ambientGain = null;
+state.ambientSource = null;
+state.ambientBuffer = null;
+state.ambientName = null;
+const AMBIENT_VOLUME = 0.22;
+
+function ensureAmbientGain() {
+  if (state.ambientGain) return state.ambientGain;
+  const ctx = getAudioCtx();
+  state.ambientGain = ctx.createGain();
+  state.ambientGain.gain.value = state.ambientEnabled ? AMBIENT_VOLUME : 0;
+  state.ambientGain.connect(ctx.destination);
+  return state.ambientGain;
+}
+
+function loadAmbientFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async (ev) => {
+    try {
+      const ctx = getAudioCtx();
+      const buf = await ctx.decodeAudioData(ev.target.result);
+      // Stop existing source if any
+      if (state.ambientSource) {
+        try { state.ambientSource.stop(); } catch(e) {}
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      src.connect(ensureAmbientGain());
+      src.start();
+      state.ambientSource = src;
+      state.ambientBuffer = buf;
+      state.ambientName = file.name;
+      const el = document.getElementById('ambient');
+      if (el) {
+        const dur = buf.duration.toFixed(1);
+        el.textContent = `♫ ${file.name} (${dur}s loop) · A=mute`;
+        el.style.color = '#cce8ff';
+        el.style.borderColor = 'rgba(180, 220, 255, 0.6)';
+      }
+    } catch (e) {
+      const el = document.getElementById('ambient');
+      if (el) el.textContent = 'Could not decode that file';
+      console.error('ambient decode error', e);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function toggleAmbient() {
+  if (!state.ambientGain) return;
+  state.ambientEnabled = !state.ambientEnabled;
+  const ctx = getAudioCtx();
+  state.ambientGain.gain.cancelScheduledValues(ctx.currentTime);
+  state.ambientGain.gain.linearRampToValueAtTime(
+    state.ambientEnabled ? AMBIENT_VOLUME : 0, ctx.currentTime + 0.4
+  );
+  setStatus(state.ambientEnabled ? 'Ambient on' : 'Ambient muted');
+}
+
+function wireAmbientUI() {
+  const el = document.getElementById('ambient');
+  const input = document.getElementById('ambientFile');
+  const drop = document.getElementById('dropOverlay');
+  if (el) el.addEventListener('click', () => input && input.click());
+  if (input) input.addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) loadAmbientFile(f);
+  });
+  // Drag-drop on the whole document
+  const showDrop = () => { if (drop) drop.style.display = 'flex'; };
+  const hideDrop = () => { if (drop) drop.style.display = 'none'; };
+  let dragCount = 0;
+  document.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dragCount++;
+    showDrop();
+  });
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('dragleave', (e) => {
+    dragCount--;
+    if (dragCount <= 0) { dragCount = 0; hideDrop(); }
+  });
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragCount = 0;
+    hideDrop();
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f && f.type.startsWith('audio/')) loadAmbientFile(f);
+  });
 }
 
 // =========================================================================

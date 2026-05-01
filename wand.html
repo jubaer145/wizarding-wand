@@ -14,19 +14,19 @@
     color: #e8d8a0; pointer-events: none;
   }
   #spellbook {
-    position: fixed; top: 12px; right: 12px; z-index: 10;
-    padding: 10px 14px; background: rgba(20, 14, 4, 0.85);
+    position: fixed; top: 8px; right: 8px; z-index: 10;
+    padding: 8px 12px; background: rgba(20, 14, 4, 0.85);
     border: 1px solid rgba(232, 216, 160, 0.3); border-radius: 6px;
-    font-size: 11px; max-width: 260px; line-height: 1.5;
+    font-size: 10px; max-width: 220px; line-height: 1.45;
     color: #c8b878; box-shadow: 0 0 30px rgba(0,0,0,0.6);
   }
   #spellbook h3 {
-    margin: 0 0 6px 0; font-size: 13px; letter-spacing: 3px;
+    margin: 0 0 6px 0; font-size: 12px; letter-spacing: 2px;
     color: #ffd700; text-shadow: 0 0 8px #ffaa0066;
     font-weight: normal;
   }
   #spellbook .spell { color: #e8d8a0; }
-  #spellbook .effect { color: #8a7a4a; font-style: italic; font-size: 10px; }
+  #spellbook .effect { color: #8a7a4a; font-style: italic; font-size: 9px; }
   #heard {
     position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
     z-index: 10; padding: 8px 18px; background: rgba(0,0,0,0.7);
@@ -698,24 +698,44 @@ function draw() {
 }
 
 function drawBackground(ctx) {
-  // deep midnight stone gradient
-  const g = ctx.createRadialGradient(width/2, height*0.85, 0, width/2, height*0.85, Math.max(width,height));
-  g.addColorStop(0, '#0a0815');
-  g.addColorStop(0.5, '#04030a');
-  g.addColorStop(1, '#000000');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, width, height);
+  if (state.videoEl && state.videoEl.readyState >= 2) {
+    // Mirror + cover-fit the live webcam feed
+    ctx.save();
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
+    const vw = state.videoEl.videoWidth || 1280;
+    const vh = state.videoEl.videoHeight || 720;
+    const canvasAspect = width / height;
+    const videoAspect = vw / vh;
+    let dw, dh, dx, dy;
+    if (canvasAspect > videoAspect) {
+      dw = width; dh = width / videoAspect; dx = 0; dy = (height - dh) / 2;
+    } else {
+      dh = height; dw = height * videoAspect; dx = (width - dw) / 2; dy = 0;
+    }
+    ctx.drawImage(state.videoEl, dx, dy, dw, dh);
+    ctx.restore();
 
-  // faint stone texture: noise dots
-  ctx.save();
-  ctx.fillStyle = 'rgba(60, 50, 40, 0.04)';
-  // pseudo-noise: use sine grid
-  for (let i = 0; i < 80; i++) {
-    const x = (i * 173) % width;
-    const y = (i * 277) % height;
-    ctx.fillRect(x, y, 60, 60);
+    // Dark midnight wash so spell colors stay vivid against skin/scene
+    ctx.fillStyle = 'rgba(5, 4, 18, 0.45)';
+    ctx.fillRect(0, 0, width, height);
+
+    // Vignette to focus attention
+    const grd = ctx.createRadialGradient(width/2, height*0.6, Math.min(width,height)*0.3,
+                                         width/2, height*0.6, Math.max(width,height)*0.75);
+    grd.addColorStop(0, 'rgba(0,0,0,0)');
+    grd.addColorStop(1, 'rgba(0,0,0,0.7)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, width, height);
+  } else {
+    // Pre-camera fallback
+    const g = ctx.createRadialGradient(width/2, height*0.85, 0, width/2, height*0.85, Math.max(width,height));
+    g.addColorStop(0, '#0a0815');
+    g.addColorStop(0.5, '#04030a');
+    g.addColorStop(1, '#000000');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, width, height);
   }
-  ctx.restore();
 }
 
 function drawHogwartsArch(ctx) {
@@ -724,7 +744,7 @@ function drawHogwartsArch(ctx) {
   const pillarW = Math.min(180, width * 0.12);
   const archStart = pillarW * 0.6;
 
-  ctx.fillStyle = 'rgba(15, 12, 8, 0.95)';
+  ctx.fillStyle = 'rgba(15, 12, 8, 0.35)';
   // left pillar
   ctx.fillRect(0, 0, pillarW, height);
   // right pillar
@@ -751,11 +771,11 @@ function drawHogwartsArch(ctx) {
   );
   ctx.lineTo(0, archBaseY);
   ctx.closePath();
-  ctx.fillStyle = 'rgba(8, 7, 5, 0.92)';
+  ctx.fillStyle = 'rgba(8, 7, 5, 0.45)';
   ctx.fill();
 
   // stone block lines on pillars
-  ctx.strokeStyle = 'rgba(80, 70, 55, 0.18)';
+  ctx.strokeStyle = 'rgba(120, 100, 75, 0.4)';
   ctx.lineWidth = 1;
   for (let y = 0; y < height; y += 60) {
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(pillarW, y); ctx.stroke();

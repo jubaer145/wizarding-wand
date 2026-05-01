@@ -114,13 +114,13 @@
   <div><span class="spell">Alohomora / Reparo</span> <span class="effect">— sparkle</span></div>
   <div style="margin-top:6px; color: #886; font-size: 10px; font-style: italic;">
     Speak the incantation, then flick to cast.<br>
-    Press <b>K</b> then click your wand tip to align.<br>
-    "Mischief Managed" clears all magic.
+    <b>K</b> + drag base→tip aligns the wand.<br>
+    <b>M</b> toggles music. "Mischief Managed" clears all.
   </div>
 </div>
 <div id="heard"></div>
 <div id="matchScore"></div>
-<div id="calOverlay"><div class="panel">Click your wand's tip in the video<small>The renderer will overlay your real wand exactly</small></div></div>
+<div id="calOverlay"><div class="panel">Drag a line along your wand: base → tip<small>(or single-click to set just the tip)</small></div></div>
 <div id="armed"></div>
 <button id="startBtn">Take Up the Wand<small>Camera + microphone required</small></button>
 
@@ -242,16 +242,35 @@ const state = {
 const FLICK_SPEED = 28;            // px per frame
 const ARM_DURATION = 6000;         // ms before armed spell expires
 const HISTORY_FRAMES = 12;
-let WAND_REACH = 1.2;              // multiplier on hand length, [ / ] adjusts
-let WAND_PERP = 0;                 // perpendicular offset (in handLen units)
 
-// Load saved calibration if present
+// Wand calibration: two endpoints, each stored as (reach, perp) in hand-local
+// frame, scaled by hand length. Default: base at the knuckle, tip 1.2× forward.
+let WAND_BASE_REACH = 0.0;
+let WAND_BASE_PERP  = 0.0;
+let WAND_TIP_REACH  = 1.2;
+let WAND_TIP_PERP   = 0.0;
+
 try {
   const saved = JSON.parse(localStorage.getItem('wandCal') || 'null');
-  if (saved) { WAND_REACH = saved.reach; WAND_PERP = saved.perp || 0; }
+  if (saved) {
+    if ('tipReach' in saved) {
+      WAND_BASE_REACH = saved.baseReach || 0;
+      WAND_BASE_PERP  = saved.basePerp  || 0;
+      WAND_TIP_REACH  = saved.tipReach;
+      WAND_TIP_PERP   = saved.tipPerp || 0;
+    } else if ('reach' in saved) {
+      // Legacy single-point calibration → tip only
+      WAND_TIP_REACH = saved.reach;
+      WAND_TIP_PERP  = saved.perp || 0;
+    }
+  }
 } catch(e) {}
 
 state.calibrating = false;
+state.calibrateDrag = null; // {ax, ay, bx, by} during drag
+state.smoothedLm = null;    // smoothed landmarks for stable rendering
+state.musicEnabled = true;
+state.musicStarted = false;
 
 // =========================================================================
 // p5 SETUP
@@ -267,41 +286,90 @@ function setup() {
 }
 
 function keyPressed() {
-  if (key === '[') { WAND_REACH = Math.max(0.4, WAND_REACH - 0.1); saveCal(); updateReachUI(); }
-  else if (key === ']') { WAND_REACH = Math.min(3.5, WAND_REACH + 0.1); saveCal(); updateReachUI(); }
-  else if (key === 'k' || key === 'K') beginCalibration();
+  if (key === '[') {
+    const span = WAND_TIP_REACH - WAND_BASE_REACH;
+    WAND_TIP_REACH = WAND_BASE_REACH + Math.max(0.3, span - 0.1);
+    saveCal(); updateReachUI();
+  } else if (key === ']') {
+    const span = WAND_TIP_REACH - WAND_BASE_REACH;
+    WAND_TIP_REACH = WAND_BASE_REACH + Math.min(3.5, span + 0.1);
+    saveCal(); updateReachUI();
+  } else if (key === 'k' || key === 'K') beginCalibration();
+  else if (key === 'm' || key === 'M') toggleMusic();
 }
 function updateReachUI() {
   const el = document.getElementById('reach');
-  if (el) el.textContent = `Wand reach: ${WAND_REACH.toFixed(2)}×  perp ${WAND_PERP.toFixed(2)}×  ([/])  K=calibrate`;
+  if (!el) return;
+  el.textContent = `wand: base(${WAND_BASE_REACH.toFixed(2)},${WAND_BASE_PERP.toFixed(2)}) → tip(${WAND_TIP_REACH.toFixed(2)},${WAND_TIP_PERP.toFixed(2)})  K=calibrate  M=music`;
 }
 function saveCal() {
-  try { localStorage.setItem('wandCal', JSON.stringify({reach: WAND_REACH, perp: WAND_PERP})); } catch(e) {}
+  try {
+    localStorage.setItem('wandCal', JSON.stringify({
+      baseReach: WAND_BASE_REACH, basePerp: WAND_BASE_PERP,
+      tipReach: WAND_TIP_REACH, tipPerp: WAND_TIP_PERP
+    }));
+  } catch(e) {}
+}
+
+function projectToHandLocal(mx, my) {
+  if (!state._knuckle || !state._fwd || !state._perp) return null;
+  const k = state._knuckle, fwd = state._fwd, perp = state._perp, hl = state._handLen;
+  const dx = mx - k.x, dy = my - k.y;
+  return {
+    along: (dx * fwd.x + dy * fwd.y) / hl,
+    perp:  (dx * perp.x + dy * perp.y) / hl
+  };
 }
 
 function beginCalibration() {
   if (!state.wandBase) { setStatus('Show your wand hand first'); return; }
   state.calibrating = true;
+  state.calibrateDrag = null;
   const el = document.getElementById('calOverlay');
   if (el) el.classList.add('active');
 }
 
 function mousePressed() {
-  if (!state.calibrating) return;
-  if (!state._knuckle || !state._fwd || !state._perp) return;
-  // Project (mouseX, mouseY) onto hand-local axes
-  const k = state._knuckle, fwd = state._fwd, perp = state._perp, hl = state._handLen;
-  const dx = mouseX - k.x, dy = mouseY - k.y;
-  const along = dx * fwd.x + dy * fwd.y;
-  const lateral = dx * perp.x + dy * perp.y;
-  WAND_REACH = along / hl;
-  WAND_PERP = lateral / hl;
+  if (!state.calibrating) return false;
+  state.calibrateDrag = { ax: mouseX, ay: mouseY, bx: mouseX, by: mouseY };
+  return false;
+}
+function mouseDragged() {
+  if (!state.calibrating || !state.calibrateDrag) return false;
+  state.calibrateDrag.bx = mouseX;
+  state.calibrateDrag.by = mouseY;
+  return false;
+}
+function mouseReleased() {
+  if (!state.calibrating || !state.calibrateDrag) return false;
+  const d = state.calibrateDrag;
+  const dragDist = Math.hypot(d.bx - d.ax, d.by - d.ay);
+  // If user did just a single click (no drag), treat as tip-only legacy mode
+  if (dragDist < 8) {
+    const single = projectToHandLocal(d.ax, d.ay);
+    if (single) {
+      WAND_TIP_REACH = single.along;
+      WAND_TIP_PERP  = single.perp;
+      // Leave base at current default unless the user also wants to recalibrate it
+    }
+  } else {
+    const baseLocal = projectToHandLocal(d.ax, d.ay);
+    const tipLocal  = projectToHandLocal(d.bx, d.by);
+    if (baseLocal && tipLocal) {
+      WAND_BASE_REACH = baseLocal.along;
+      WAND_BASE_PERP  = baseLocal.perp;
+      WAND_TIP_REACH  = tipLocal.along;
+      WAND_TIP_PERP   = tipLocal.perp;
+    }
+  }
   saveCal();
   updateReachUI();
   state.calibrating = false;
+  state.calibrateDrag = null;
   const el = document.getElementById('calOverlay');
   if (el) el.classList.remove('active');
   setStatus('Calibrated. Speak. Then flick.');
+  return false;
 }
 function windowResized() { resizeCanvas(windowWidth, windowHeight); }
 function setStatus(m) { const e = document.getElementById('status'); if (e) e.textContent = m; }
@@ -311,6 +379,8 @@ function begin() {
   initSpeech();
   initMediaPipe();
   setStatus('Granting permissions…');
+  // User gesture has occurred → safe to start audio
+  startHedwigsTheme();
 }
 
 // =========================================================================
@@ -650,6 +720,93 @@ function applySpellKick(name, def) {
 }
 
 // =========================================================================
+// MUSIC — Hedwig's Theme melody, synthesized softly with celesta-like sines.
+// Iconic opening motif in B-minor, looped with a long pause between passes.
+// =========================================================================
+function midiToFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+// MIDI: B4=71, E5=76, G5=79, F#5=78, B5=83, A5=81, D#5=75, G#5=80
+const HEDWIG_NOTES = [
+  // Opening motif
+  [71, 0.55],  // B4
+  [76, 0.30],  // E5
+  [79, 0.50],  // G5
+  [78, 0.30],  // F#5
+  [76, 0.85],  // E5 (long)
+  [83, 0.55],  // B5
+  [81, 0.85],  // A5 (held)
+  [78, 1.30],  // F#5 (long)
+  // Phrase 2
+  [76, 0.55],
+  [79, 0.30],
+  [78, 0.50],
+  [74, 0.30],  // D5
+  [78, 0.85],
+  [76, 1.40],  // E5 long
+  // brief silence
+  [-1, 1.6],
+];
+function playHedwigNote(t0, midi, dur, vol) {
+  const ctx = getAudioCtx();
+  if (midi < 0) return;
+  const freq = midiToFreq(midi);
+  // Bell/celesta: stacked sines with a very fast attack and long-ish decay
+  const partials = [
+    { mult: 1,    amp: 1.0  },
+    { mult: 2,    amp: 0.35 },
+    { mult: 3,    amp: 0.18 },
+    { mult: 4.01, amp: 0.08 },
+  ];
+  const sumAmp = partials.reduce((s,p)=>s+p.amp, 0);
+  for (const p of partials) {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freq * p.mult;
+    const gain = ctx.createGain();
+    const peak = vol * (p.amp / sumAmp);
+    gain.gain.setValueAtTime(0, t0);
+    gain.gain.linearRampToValueAtTime(peak, t0 + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain); gain.connect(state.musicMaster);
+    osc.start(t0); osc.stop(t0 + dur + 0.05);
+  }
+}
+function startHedwigsTheme() {
+  if (state.musicStarted) return;
+  const ctx = getAudioCtx();
+  state.musicMaster = ctx.createGain();
+  state.musicMaster.gain.value = state.musicEnabled ? 0.05 : 0;
+  state.musicMaster.connect(ctx.destination);
+  state.musicStarted = true;
+  scheduleHedwigLoop(ctx.currentTime + 0.5);
+}
+function scheduleHedwigLoop(startTime) {
+  const ctx = getAudioCtx();
+  const beat = 0.55; // seconds per "beat"
+  let t = startTime;
+  for (const [m, dur] of HEDWIG_NOTES) {
+    const seconds = dur * beat;
+    if (m >= 0) playHedwigNote(t, m, seconds * 1.6, 0.3);
+    t += seconds;
+  }
+  // Schedule the next loop after a 4s breather
+  const loopEnd = t + 4.0;
+  // setTimeout-based reschedule (avoids unbounded recursion of audio scheduling)
+  const msUntil = (loopEnd - ctx.currentTime) * 1000 - 500;
+  setTimeout(() => scheduleHedwigLoop(loopEnd), Math.max(100, msUntil));
+}
+function toggleMusic() {
+  state.musicEnabled = !state.musicEnabled;
+  if (state.musicMaster) {
+    const ctx = getAudioCtx();
+    state.musicMaster.gain.cancelScheduledValues(ctx.currentTime);
+    state.musicMaster.gain.linearRampToValueAtTime(
+      state.musicEnabled ? 0.05 : 0, ctx.currentTime + 0.4
+    );
+  }
+  setStatus(state.musicEnabled ? 'Music on' : 'Music muted');
+}
+
+// =========================================================================
 // WAND TRACKING
 // =========================================================================
 function updateWand() {
@@ -657,12 +814,23 @@ function updateWand() {
       state.latestResults.multiHandLandmarks.length === 0) {
     state.wandTip = null; state.wandBase = null; return;
   }
-  const lm = state.latestResults.multiHandLandmarks[0];
-  const pts = lm.map(p => ({ x: (1 - p.x) * width, y: p.y * height }));
+  const lmRaw = state.latestResults.multiHandLandmarks[0];
+  const rawPts = lmRaw.map(p => ({ x: (1 - p.x) * width, y: p.y * height }));
 
-  // Wand axis: wrist (0) → knuckle line center (avg of MCPs 5,9,13,17).
-  // The knuckle line is more stable than a single MCP and gives the
-  // "out of the fist" direction along which the wand actually exits.
+  // Temporal smoothing: exponential moving average per landmark to kill jitter
+  // while staying responsive. Higher alpha = snappier (more jitter).
+  const ALPHA = 0.55;
+  if (!state.smoothedLm || state.smoothedLm.length !== rawPts.length) {
+    state.smoothedLm = rawPts.map(p => ({ ...p }));
+  } else {
+    for (let i = 0; i < rawPts.length; i++) {
+      state.smoothedLm[i].x = state.smoothedLm[i].x * (1 - ALPHA) + rawPts[i].x * ALPHA;
+      state.smoothedLm[i].y = state.smoothedLm[i].y * (1 - ALPHA) + rawPts[i].y * ALPHA;
+    }
+  }
+  const pts = state.smoothedLm;
+
+  // Hand-local frame: forward = wrist→knuckle-center, perp = 90° CCW
   const wrist = pts[0];
   const knuckle = {
     x: (pts[5].x + pts[9].x + pts[13].x + pts[17].x) / 4,
@@ -671,15 +839,18 @@ function updateWand() {
   const dx = knuckle.x - wrist.x, dy = knuckle.y - wrist.y;
   const handLen = Math.hypot(dx, dy) + 1e-3;
   const dirX = dx / handLen, dirY = dy / handLen;
-  // Perpendicular axis (90° CCW)
   const perpX = -dirY, perpY = dirX;
-  // Base anchored at knuckle line; tip = knuckle + reach·forward + perp·perpendicular
-  const base = { x: knuckle.x, y: knuckle.y };
-  const tip = {
-    x: knuckle.x + dirX * handLen * WAND_REACH + perpX * handLen * WAND_PERP,
-    y: knuckle.y + dirY * handLen * WAND_REACH + perpY * handLen * WAND_PERP
+
+  // Both endpoints reconstructed from calibration in real time
+  const base = {
+    x: knuckle.x + dirX * handLen * WAND_BASE_REACH + perpX * handLen * WAND_BASE_PERP,
+    y: knuckle.y + dirY * handLen * WAND_BASE_REACH + perpY * handLen * WAND_BASE_PERP
   };
-  // Update wand direction so spells fire from base toward tip (handles perp offset)
+  const tip = {
+    x: knuckle.x + dirX * handLen * WAND_TIP_REACH + perpX * handLen * WAND_TIP_PERP,
+    y: knuckle.y + dirY * handLen * WAND_TIP_REACH + perpY * handLen * WAND_TIP_PERP
+  };
+
   const tdx = tip.x - base.x, tdy = tip.y - base.y;
   const tlen = Math.hypot(tdx, tdy) + 1e-3;
   state._spellDir = { x: tdx / tlen, y: tdy / tlen };
@@ -781,19 +952,36 @@ function fireSpell(name, def) {
         progress: 0
       });
       break;
-    case 'patronus':
+    case 'patronus': {
+      // Random: stag (with antlers) or doe (no antlers)
+      const variant = Math.random() < 0.5 ? 'stag' : 'doe';
+      // Build a graceful curving path for the patronus to follow.
+      // Start at the wand tip, head in the wand-pointing direction,
+      // curve across the screen, exit on the opposite side.
+      const startX = tip.x, startY = tip.y;
+      const baseDirX = dir.x, baseDirY = dir.y;
+      // Pick a curve target: cross to the far side with vertical sweep
+      const sideX = baseDirX > 0 ? width + 200 : -200;
+      const targetY = height * (0.3 + Math.random() * 0.4);
+      const ctrl1X = startX + baseDirX * 200 + (Math.random() - 0.5) * 200;
+      const ctrl1Y = startY + baseDirY * 200 - 200;
+      const ctrl2X = (startX + sideX) / 2 + (Math.random() - 0.5) * 100;
+      const ctrl2Y = targetY - 100 + Math.random() * 200;
       state.effects.push({
-        kind: 'patronus', spell: name, color: def.color,
-        origin: tip, dir, bornAt: t, life: 4000,
-        wisps: Array.from({length: 60}, () => ({
-          x: tip.x + (Math.random() - 0.5) * 40,
-          y: tip.y + (Math.random() - 0.5) * 40,
-          vx: dir.x * (2 + Math.random() * 3) + (Math.random() - 0.5),
-          vy: dir.y * (2 + Math.random() * 3) + (Math.random() - 0.5),
-          life: 1
-        }))
+        kind: 'patronusAnimal', variant, color: '#e8f8ff',
+        bornAt: t, life: 6500,
+        path: { p0:{x:startX,y:startY}, c1:{x:ctrl1X,y:ctrl1Y}, c2:{x:ctrl2X,y:ctrl2Y}, p1:{x:sideX,y:targetY} },
+        animPhase: 0,
+        wisps: [],
+        lastPos: { x: startX, y: startY },
+        // burst at birth
+        birthBurst: Array.from({length: 30}, () => {
+          const a = Math.random() * Math.PI * 2; const s = 1 + Math.random()*4;
+          return { x: startX, y: startY, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: 1 };
+        })
       });
       break;
+    }
     case 'shield':
       state.shield = { until: t + 5000, strength: 1, origin: { x: width/2, y: height/2 } };
       break;
@@ -871,10 +1059,30 @@ function makeDummy() {
 
 function updateDummies() {
   const t = millis();
+  // Lumos repels dementors: while Lumos is on and the wand is visible,
+  // every dementor gets a continuous outward push from the wand tip.
+  // Force is inverse-distance so close ones flee fast, far ones drift.
+  const lumosActive = state.lumosOn && state.wandTip;
   for (const d of state.dummies) {
     if (!d.alive) {
       if (d.respawnAt && t > d.respawnAt) Object.assign(d, makeDummy());
       continue;
+    }
+    if (lumosActive && !d.dyingAt) {
+      const dxL = d.x - state.wandTip.x;
+      const dyL = d.y - state.wandTip.y;
+      const distL = Math.hypot(dxL, dyL) + 0.01;
+      const dirX = dxL / distL, dirY = dyL / distL;
+      // Force scales like 1/dist with a clamp; effective range ~600px
+      const force = Math.min(2.5, 220 / distL);
+      d.vx += dirX * force;
+      d.vy += dirY * force;
+      d.fleeingUntil = t + 200;
+      // Occasional jitter while frightened
+      if (Math.random() < 0.15) {
+        d.vx += (Math.random() - 0.5) * 1.5;
+        d.vy += (Math.random() - 0.5) * 1.5;
+      }
     }
     // Avada Kedavra slow death — fade and slump while still "alive" briefly
     if (d.dyingAt) {
@@ -1106,6 +1314,36 @@ function updateEffects() {
         w.vy += (Math.random() - 0.5) * 0.4 - 0.05;
         w.life -= 0.005;
       }
+    } else if (e.kind === 'patronusAnimal') {
+      e.animPhase += 0.18;
+      // Spawn trailing wisps along the body each frame
+      const f = age / e.life;
+      const pos = bezierPoint(e.path, Math.min(0.99, f));
+      // 3 fresh wisps per frame
+      for (let k = 0; k < 3; k++) {
+        e.wisps.push({
+          x: pos.x + (Math.random()-0.5)*40,
+          y: pos.y + (Math.random()-0.5)*30,
+          vx: (Math.random()-0.5)*0.6,
+          vy: -0.4 - Math.random()*0.6,
+          life: 1, size: 1.5 + Math.random()*2
+        });
+      }
+      while (e.wisps.length > 240) e.wisps.shift();
+      for (const w of e.wisps) {
+        w.x += w.vx; w.y += w.vy;
+        w.vy *= 0.99;
+        w.life -= 0.012;
+      }
+      e.lastPos = pos;
+      // Update birth burst
+      if (e.birthBurst) {
+        for (const p of e.birthBurst) {
+          p.x += p.vx; p.y += p.vy;
+          p.vx *= 0.93; p.vy *= 0.93;
+          p.life -= 0.025;
+        }
+      }
     } else if (e.kind === 'sparkle' || e.kind === 'burst' || e.kind === 'particle') {
       for (const p of e.particles) {
         p.x += p.vx; p.y += p.vy;
@@ -1173,6 +1411,21 @@ function draw() {
 
   // Flash on top so it covers shaken content too
   drawFlash(ctx);
+
+  // Calibration drag preview (above everything)
+  if (state.calibrating && state.calibrateDrag) {
+    const d = state.calibrateDrag;
+    ctx.save();
+    ctx.shadowBlur = 18; ctx.shadowColor = '#ffd700';
+    ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 3;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(d.ax, d.ay); ctx.lineTo(d.bx, d.by); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath(); ctx.arc(d.ax, d.ay, 5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(d.bx, d.by, 7, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
 }
 
 function drawBackground(ctx) {
@@ -1340,10 +1593,15 @@ function drawDummies(ctx) {
 
     // glowing eyes
     ctx.shadowBlur = 10;
+    const fleeing = d.fleeingUntil && d.fleeingUntil > t;
     if (d.statusUntil > t && d.status === 'stunned') {
       ctx.shadowColor = '#ff5544'; ctx.fillStyle = '#ff7755';
     } else if (d.frozenUntil > t) {
       ctx.shadowColor = '#88ddff'; ctx.fillStyle = '#bbeeff';
+    } else if (fleeing) {
+      // Flicker: eyes dim/brighten rapidly while fleeing Lumos
+      const flick = (Math.sin(t * 0.04) + Math.sin(t * 0.063)) > 0.4 ? 1 : 0.25;
+      ctx.shadowColor = '#fff8aa'; ctx.fillStyle = `rgba(255, 240, 160, ${flick})`;
     } else {
       ctx.shadowColor = '#ff4422'; ctx.fillStyle = '#ff6644';
     }
@@ -1385,6 +1643,130 @@ function drawDummies(ctx) {
 
     ctx.restore();
   }
+}
+
+// Cubic Bézier evaluation
+function bezierPoint(path, t) {
+  const u = 1 - t;
+  const a = u*u*u, b = 3*u*u*t, c = 3*u*t*t, d = t*t*t;
+  return {
+    x: a*path.p0.x + b*path.c1.x + c*path.c2.x + d*path.p1.x,
+    y: a*path.p0.y + b*path.c1.y + c*path.c2.y + d*path.p1.y
+  };
+}
+function bezierTangent(path, t) {
+  const u = 1 - t;
+  const dx = 3*u*u*(path.c1.x - path.p0.x) + 6*u*t*(path.c2.x - path.c1.x) + 3*t*t*(path.p1.x - path.c2.x);
+  const dy = 3*u*u*(path.c1.y - path.p0.y) + 6*u*t*(path.c2.y - path.c1.y) + 3*t*t*(path.p1.y - path.c2.y);
+  const m = Math.hypot(dx, dy) + 1e-3;
+  return { x: dx / m, y: dy / m };
+}
+
+// Draw a stag/doe silhouette in glowing silver-white. The body is drawn in
+// a local frame oriented along (dirX, dirY) with origin at the chest center.
+function drawDeer(ctx, x, y, size, dirX, dirY, withAntlers, animPhase, alpha) {
+  ctx.save();
+  ctx.translate(x, y);
+  // Rotate local +X to face direction
+  const angle = Math.atan2(dirY, dirX);
+  ctx.rotate(angle);
+  ctx.scale(size, size);
+  ctx.globalAlpha = alpha;
+
+  ctx.shadowBlur = 26 / size; ctx.shadowColor = '#c8e6ff';
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+  // Outer ethereal aura
+  ctx.fillStyle = 'rgba(180, 220, 255, 0.18)';
+  ctx.beginPath(); ctx.ellipse(0, 0, 1.2, 0.6, 0, 0, Math.PI*2); ctx.fill();
+
+  // Body (oval)
+  ctx.fillStyle = 'rgba(220, 240, 255, 0.85)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+  ctx.lineWidth = 0.04;
+  ctx.beginPath(); ctx.ellipse(0, 0, 0.55, 0.28, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+
+  // Tail
+  ctx.beginPath();
+  ctx.moveTo(-0.55, -0.05);
+  ctx.lineTo(-0.75, -0.18);
+  ctx.lineTo(-0.7, -0.05);
+  ctx.closePath(); ctx.fill();
+
+  // Neck — curving up-forward from chest
+  ctx.lineWidth = 0.18;
+  ctx.beginPath();
+  ctx.moveTo(0.4, -0.1);
+  ctx.quadraticCurveTo(0.7, -0.4, 0.85, -0.55);
+  ctx.stroke();
+
+  // Head
+  ctx.fillStyle = 'rgba(230, 245, 255, 0.95)';
+  ctx.beginPath(); ctx.ellipse(0.92, -0.62, 0.16, 0.1, 0.2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  // Snout extension
+  ctx.beginPath();
+  ctx.moveTo(1.02, -0.6);
+  ctx.lineTo(1.14, -0.58);
+  ctx.lineTo(1.04, -0.52);
+  ctx.closePath(); ctx.fill();
+
+  // Eye spark
+  ctx.fillStyle = 'rgba(255, 255, 255, 1)';
+  ctx.beginPath(); ctx.arc(0.94, -0.66, 0.018, 0, Math.PI*2); ctx.fill();
+
+  // Antlers — only for stag
+  if (withAntlers) {
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+    ctx.lineWidth = 0.05;
+    // main beam
+    const drawAntler = (sideY) => {
+      ctx.beginPath();
+      ctx.moveTo(0.88, -0.7);
+      ctx.lineTo(0.95 + sideY*0.0, -1.0);
+      ctx.lineTo(1.05 + sideY*0.02, -1.18);
+      ctx.stroke();
+      // tines
+      ctx.beginPath();
+      ctx.moveTo(0.95, -0.92); ctx.lineTo(0.78 + sideY*-0.05, -1.05); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(1.0, -1.05); ctx.lineTo(1.18, -1.16); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(1.05, -1.18); ctx.lineTo(0.92 + sideY*-0.04, -1.32); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(1.05, -1.18); ctx.lineTo(1.18, -1.30); ctx.stroke();
+    };
+    // two slightly offset antlers for depth
+    drawAntler(0);
+    ctx.globalAlpha = alpha * 0.7;
+    drawAntler(0.05);
+    ctx.globalAlpha = alpha;
+  }
+
+  // Legs — animated gallop cycle (4 legs phased)
+  ctx.strokeStyle = 'rgba(220, 240, 255, 0.9)';
+  ctx.lineWidth = 0.06;
+  const phases = [0, Math.PI*0.6, Math.PI, Math.PI*1.6];
+  const legAnchors = [
+    { x:  0.35, y: 0.12 },  // front near
+    { x:  0.30, y: 0.16 },  // front far
+    { x: -0.28, y: 0.12 },  // hind near
+    { x: -0.33, y: 0.16 }   // hind far
+  ];
+  for (let i = 0; i < 4; i++) {
+    const a = legAnchors[i];
+    const swing = Math.sin(animPhase + phases[i]) * 0.18;
+    const lift  = Math.max(0, Math.sin(animPhase + phases[i])) * 0.1;
+    const kneeX = a.x + swing * 0.6;
+    const kneeY = a.y + 0.18 - lift;
+    const footX = a.x + swing;
+    const footY = a.y + 0.36 - lift * 0.4;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.quadraticCurveTo(kneeX, kneeY, footX, footY);
+    ctx.stroke();
+  }
+
+  ctx.restore();
 }
 
 function drawEffects(ctx) {
@@ -1515,6 +1897,47 @@ function drawEffects(ctx) {
         ctx.fillStyle = '#bbddff'; ctx.shadowColor = '#88bbff';
         ctx.beginPath(); ctx.arc(w.x, w.y, 6 * w.life, 0, Math.PI*2); ctx.fill();
       }
+    } else if (e.kind === 'patronusAnimal') {
+      const f = age / e.life;
+      const t01 = Math.min(0.99, f);
+      const pos = bezierPoint(e.path, t01);
+      const tan = bezierTangent(e.path, t01);
+
+      // Wisp trail
+      for (const w of e.wisps) {
+        if (w.life <= 0) continue;
+        ctx.shadowBlur = 18; ctx.shadowColor = '#cce8ff';
+        ctx.globalAlpha = w.life * 0.85;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#9fc8ff'; ctx.shadowColor = '#88bbff';
+        ctx.globalAlpha = w.life * 0.35;
+        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life * 1.8, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // Birth burst at the wand tip (first ~700ms)
+      if (e.birthBurst) {
+        for (const p of e.birthBurst) {
+          if (p.life <= 0) continue;
+          ctx.shadowBlur = 16; ctx.shadowColor = '#cce8ff';
+          ctx.fillStyle = '#ffffff';
+          ctx.globalAlpha = p.life * 0.9;
+          ctx.beginPath(); ctx.arc(p.x, p.y, 2 + p.life * 2, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // The animal itself: fade in over first 12%, fade out over last 15%
+      let alpha = 1;
+      if (f < 0.12) alpha = f / 0.12;
+      else if (f > 0.85) alpha = (1 - f) / 0.15;
+      alpha = Math.max(0, Math.min(1, alpha));
+
+      // Size scales slightly with viewport
+      const size = Math.min(width, height) * 0.18;
+      drawDeer(ctx, pos.x, pos.y, size, tan.x, tan.y, e.variant === 'stag', e.animPhase, alpha);
+      ctx.globalAlpha = 1;
     } else if (e.kind === 'sparkle' || e.kind === 'burst' || e.kind === 'particle') {
       for (const p of e.particles) {
         if (p.life <= 0) continue;

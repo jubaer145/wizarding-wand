@@ -47,6 +47,22 @@
     opacity: 0; transition: opacity 0.25s ease; pointer-events: none;
   }
   #matchScore.active { opacity: 1; }
+  #calOverlay {
+    position: fixed; inset: 0; z-index: 30;
+    background: rgba(0, 0, 0, 0.45);
+    display: none; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  #calOverlay.active { display: flex; }
+  #calOverlay .panel {
+    padding: 18px 28px; background: rgba(20, 14, 4, 0.92);
+    border: 2px solid #ffd700; border-radius: 8px;
+    color: #ffd700; text-align: center;
+    font-size: 14px; letter-spacing: 2px; text-transform: uppercase;
+    text-shadow: 0 0 10px #ffaa0066; box-shadow: 0 0 30px #ffaa0033;
+  }
+  #calOverlay .panel small { display: block; font-size: 10px; color: #aa9050; margin-top: 6px; letter-spacing: 1px; text-transform: none; }
+  body.calibrating canvas { cursor: crosshair; }
   #armed {
     position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
     z-index: 10; padding: 10px 26px; background: rgba(0,0,0,0.8);
@@ -97,12 +113,14 @@
   <div><span class="spell">Lumos / Nox</span> <span class="effect">— light on/off</span></div>
   <div><span class="spell">Alohomora / Reparo</span> <span class="effect">— sparkle</span></div>
   <div style="margin-top:6px; color: #886; font-size: 10px; font-style: italic;">
-    Speak the incantation, then flick the wand to cast.<br>
+    Speak the incantation, then flick to cast.<br>
+    Press <b>K</b> then click your wand tip to align.<br>
     "Mischief Managed" clears all magic.
   </div>
 </div>
 <div id="heard"></div>
 <div id="matchScore"></div>
+<div id="calOverlay"><div class="panel">Click your wand's tip in the video<small>The renderer will overlay your real wand exactly</small></div></div>
 <div id="armed"></div>
 <button id="startBtn">Take Up the Wand<small>Camera + microphone required</small></button>
 
@@ -225,6 +243,15 @@ const FLICK_SPEED = 28;            // px per frame
 const ARM_DURATION = 6000;         // ms before armed spell expires
 const HISTORY_FRAMES = 12;
 let WAND_REACH = 1.2;              // multiplier on hand length, [ / ] adjusts
+let WAND_PERP = 0;                 // perpendicular offset (in handLen units)
+
+// Load saved calibration if present
+try {
+  const saved = JSON.parse(localStorage.getItem('wandCal') || 'null');
+  if (saved) { WAND_REACH = saved.reach; WAND_PERP = saved.perp || 0; }
+} catch(e) {}
+
+state.calibrating = false;
 
 // =========================================================================
 // p5 SETUP
@@ -236,15 +263,45 @@ function setup() {
   spawnDummies();
   document.getElementById('startBtn').addEventListener('click', begin);
   setStatus('Click the button to begin');
+  updateReachUI();
 }
 
 function keyPressed() {
-  if (key === '[') { WAND_REACH = Math.max(0.4, WAND_REACH - 0.1); updateReachUI(); }
-  else if (key === ']') { WAND_REACH = Math.min(3.0, WAND_REACH + 0.1); updateReachUI(); }
+  if (key === '[') { WAND_REACH = Math.max(0.4, WAND_REACH - 0.1); saveCal(); updateReachUI(); }
+  else if (key === ']') { WAND_REACH = Math.min(3.5, WAND_REACH + 0.1); saveCal(); updateReachUI(); }
+  else if (key === 'k' || key === 'K') beginCalibration();
 }
 function updateReachUI() {
   const el = document.getElementById('reach');
-  if (el) el.textContent = `Wand reach: ${WAND_REACH.toFixed(1)}× ([ / ])`;
+  if (el) el.textContent = `Wand reach: ${WAND_REACH.toFixed(2)}×  perp ${WAND_PERP.toFixed(2)}×  ([/])  K=calibrate`;
+}
+function saveCal() {
+  try { localStorage.setItem('wandCal', JSON.stringify({reach: WAND_REACH, perp: WAND_PERP})); } catch(e) {}
+}
+
+function beginCalibration() {
+  if (!state.wandBase) { setStatus('Show your wand hand first'); return; }
+  state.calibrating = true;
+  const el = document.getElementById('calOverlay');
+  if (el) el.classList.add('active');
+}
+
+function mousePressed() {
+  if (!state.calibrating) return;
+  if (!state._knuckle || !state._fwd || !state._perp) return;
+  // Project (mouseX, mouseY) onto hand-local axes
+  const k = state._knuckle, fwd = state._fwd, perp = state._perp, hl = state._handLen;
+  const dx = mouseX - k.x, dy = mouseY - k.y;
+  const along = dx * fwd.x + dy * fwd.y;
+  const lateral = dx * perp.x + dy * perp.y;
+  WAND_REACH = along / hl;
+  WAND_PERP = lateral / hl;
+  saveCal();
+  updateReachUI();
+  state.calibrating = false;
+  const el = document.getElementById('calOverlay');
+  if (el) el.classList.remove('active');
+  setStatus('Calibrated. Speak. Then flick.');
 }
 function windowResized() { resizeCanvas(windowWidth, windowHeight); }
 function setStatus(m) { const e = document.getElementById('status'); if (e) e.textContent = m; }
@@ -394,9 +451,202 @@ function castInstant(name, def) {
       d.status = 'normal'; d.statusUntil = 0;
       d.health = d.maxHealth; d.alive = true;
       d.burnUntil = 0; d.frozenUntil = 0; d.levitating = false;
+      d.dyingAt = 0; d.deathColor = null;
     }
     hideArmed();
   }
+  playSpellSound(name, def);
+}
+
+// =========================================================================
+// AUDIO — Web Audio synth (no external samples). Each spell gets its own
+// timbre so the sound matches its visual character.
+// =========================================================================
+let _audioCtx = null;
+function getAudioCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_audioCtx.state === 'suspended') _audioCtx.resume();
+  return _audioCtx;
+}
+function playTone({type='sine', startFreq, endFreq, duration=0.3, volume=0.3, delay=0}) {
+  const ctx = getAudioCtx();
+  const t0 = ctx.currentTime + delay;
+  const osc = ctx.createOscillator();
+  osc.type = type;
+  osc.frequency.setValueAtTime(startFreq, t0);
+  if (endFreq) osc.frequency.exponentialRampToValueAtTime(Math.max(0.01, endFreq), t0 + duration);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0, t0);
+  gain.gain.linearRampToValueAtTime(volume, t0 + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+  osc.connect(gain); gain.connect(ctx.destination);
+  osc.start(t0); osc.stop(t0 + duration + 0.05);
+}
+function playNoise({filterType='bandpass', filterFreq=1000, Q=1, duration=0.4, volume=0.3, delay=0}) {
+  const ctx = getAudioCtx();
+  const t0 = ctx.currentTime + delay;
+  const len = Math.max(1, Math.floor(ctx.sampleRate * duration));
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = filterType; filt.frequency.value = filterFreq; filt.Q.value = Q;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(volume, t0);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+  src.connect(filt); filt.connect(gain); gain.connect(ctx.destination);
+  src.start(t0);
+}
+function playSpellSound(name) {
+  try {
+    switch (name) {
+      case 'avada kedavra':
+        playTone({type:'sawtooth', startFreq:120, endFreq:35, duration:0.7, volume:0.35});
+        playNoise({filterType:'lowpass', filterFreq:180, duration:0.55, volume:0.4});
+        playTone({type:'sine', startFreq:50, endFreq:30, duration:0.6, volume:0.4, delay:0.05});
+        break;
+      case 'crucio':
+        playNoise({filterType:'bandpass', filterFreq:1800, Q:10, duration:0.5, volume:0.3});
+        playNoise({filterType:'highpass', filterFreq:2500, duration:0.4, volume:0.2, delay:0.1});
+        break;
+      case 'sectumsempra':
+        playNoise({filterType:'highpass', filterFreq:3000, duration:0.18, volume:0.4});
+        playTone({type:'sawtooth', startFreq:1200, endFreq:200, duration:0.25, volume:0.25});
+        break;
+      case 'stupefy':
+        playTone({type:'square', startFreq:380, endFreq:90, duration:0.28, volume:0.3});
+        playNoise({filterType:'bandpass', filterFreq:600, Q:4, duration:0.2, volume:0.2});
+        break;
+      case 'reducto':
+        playTone({type:'triangle', startFreq:520, endFreq:90, duration:0.55, volume:0.32});
+        playNoise({filterType:'bandpass', filterFreq:1200, duration:0.4, volume:0.2});
+        break;
+      case 'bombarda':
+        playNoise({filterType:'lowpass', filterFreq:280, duration:0.7, volume:0.5});
+        playTone({type:'sine', startFreq:75, endFreq:25, duration:0.55, volume:0.45});
+        playTone({type:'sawtooth', startFreq:200, endFreq:60, duration:0.4, volume:0.25, delay:0.02});
+        break;
+      case 'incendio':
+        playNoise({filterType:'highpass', filterFreq:600, duration:0.8, volume:0.3});
+        playTone({type:'sawtooth', startFreq:200, endFreq:80, duration:0.7, volume:0.2});
+        break;
+      case 'aguamenti':
+        playNoise({filterType:'bandpass', filterFreq:2200, Q:0.6, duration:0.85, volume:0.25});
+        break;
+      case 'glacius':
+        playTone({type:'sine', startFreq:1600, endFreq:3200, duration:0.45, volume:0.22});
+        playNoise({filterType:'highpass', filterFreq:3500, duration:0.45, volume:0.18});
+        break;
+      case 'expecto patronum':
+        playTone({type:'sine', startFreq:660, duration:1.4, volume:0.22});
+        playTone({type:'sine', startFreq:880, duration:1.4, volume:0.22, delay:0.08});
+        playTone({type:'sine', startFreq:1320, duration:1.4, volume:0.18, delay:0.16});
+        break;
+      case 'protego':
+        playTone({type:'sine', startFreq:440, endFreq:880, duration:0.5, volume:0.25});
+        playTone({type:'sine', startFreq:660, endFreq:1320, duration:0.5, volume:0.18, delay:0.05});
+        break;
+      case 'wingardium leviosa':
+        playTone({type:'sine', startFreq:200, endFreq:720, duration:0.85, volume:0.25});
+        break;
+      case 'accio':
+        playTone({type:'triangle', startFreq:680, endFreq:180, duration:0.5, volume:0.27});
+        break;
+      case 'depulso':
+        playTone({type:'triangle', startFreq:180, endFreq:680, duration:0.5, volume:0.27});
+        break;
+      case 'lumos':
+        playTone({type:'sine', startFreq:880, endFreq:1320, duration:0.35, volume:0.22});
+        playTone({type:'sine', startFreq:1760, duration:0.5, volume:0.12, delay:0.05});
+        break;
+      case 'nox':
+        playTone({type:'sine', startFreq:880, endFreq:220, duration:0.4, volume:0.2});
+        break;
+      case 'alohomora':
+        playTone({type:'sine', startFreq:1200, endFreq:1800, duration:0.3, volume:0.2});
+        playTone({type:'sine', startFreq:1500, endFreq:2200, duration:0.3, volume:0.15, delay:0.1});
+        break;
+      case 'reparo':
+        playTone({type:'sine', startFreq:600, endFreq:1200, duration:0.4, volume:0.22});
+        break;
+      case 'mischief managed':
+        playTone({type:'triangle', startFreq:660, endFreq:330, duration:0.6, volume:0.22});
+        break;
+      default:
+        playTone({type:'sine', startFreq:440, duration:0.2, volume:0.2});
+    }
+  } catch(e) { /* audio not yet allowed */ }
+}
+function playImpactSound(name) {
+  try {
+    if (name === 'avada kedavra') {
+      playNoise({filterType:'lowpass', filterFreq:140, duration:0.9, volume:0.45});
+      playTone({type:'sine', startFreq:55, endFreq:25, duration:0.9, volume:0.4});
+    } else if (name === 'bombarda' || name === 'reducto') {
+      playNoise({filterType:'lowpass', filterFreq:240, duration:0.5, volume:0.5});
+      playTone({type:'sine', startFreq:60, endFreq:25, duration:0.4, volume:0.4});
+    } else {
+      playNoise({filterType:'bandpass', filterFreq:800, duration:0.2, volume:0.25});
+    }
+  } catch(e) {}
+}
+
+// =========================================================================
+// SCREEN SHAKE + FLASH
+// =========================================================================
+function triggerShake(intensity, duration) {
+  state.shake = { intensity, duration, until: millis() + duration, started: millis() };
+}
+function triggerFlash(color, duration=180, maxAlpha=0.55) {
+  state.flash = { color, duration, until: millis() + duration, maxAlpha };
+}
+function applyShake(ctx) {
+  if (!state.shake || millis() > state.shake.until) return;
+  const remaining = (state.shake.until - millis()) / state.shake.duration;
+  const k = state.shake.intensity * remaining;
+  const sx = (Math.random() - 0.5) * k * 2;
+  const sy = (Math.random() - 0.5) * k * 2;
+  ctx.translate(sx, sy);
+}
+function drawFlash(ctx) {
+  if (!state.flash || millis() > state.flash.until) return;
+  const remaining = (state.flash.until - millis()) / state.flash.duration;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.globalAlpha = remaining * state.flash.maxAlpha;
+  ctx.fillStyle = state.flash.color;
+  ctx.fillRect(0, 0, width, height);
+  ctx.restore();
+}
+
+// Per-spell "kick" — shake + flash + sound
+const SPELL_KICK = {
+  'avada kedavra': { shake: 18, dur: 600, flashA: 0.65 },
+  'crucio':        { shake: 8,  dur: 400, flashA: 0.35 },
+  'sectumsempra':  { shake: 6,  dur: 250, flashA: 0.3 },
+  'stupefy':       { shake: 5,  dur: 250, flashA: 0.3 },
+  'reducto':       { shake: 10, dur: 400, flashA: 0.4 },
+  'bombarda':      { shake: 14, dur: 500, flashA: 0.5 },
+  'incendio':      { shake: 4,  dur: 200, flashA: 0.3 },
+  'aguamenti':     { shake: 2,  dur: 150, flashA: 0.2 },
+  'glacius':       { shake: 3,  dur: 200, flashA: 0.25 },
+  'expecto patronum':{ shake: 4, dur: 800, flashA: 0.4 },
+  'protego':       { shake: 0,  dur: 200, flashA: 0.25 },
+  'wingardium leviosa':{ shake: 0, dur: 200, flashA: 0.18 },
+  'accio':         { shake: 2,  dur: 200, flashA: 0.2 },
+  'depulso':       { shake: 4,  dur: 250, flashA: 0.25 },
+  'lumos':         { shake: 0,  dur: 0,   flashA: 0.15 },
+  'nox':           { shake: 0,  dur: 0,   flashA: 0 },
+  'alohomora':     { shake: 0,  dur: 200, flashA: 0.15 },
+  'reparo':        { shake: 0,  dur: 200, flashA: 0.15 },
+  'mischief managed':{ shake: 0, dur: 0,  flashA: 0.1 },
+};
+function applySpellKick(name, def) {
+  const k = SPELL_KICK[name] || { shake: 4, dur: 200, flashA: 0.2 };
+  if (k.shake > 0) triggerShake(k.shake, k.dur);
+  if (k.flashA > 0) triggerFlash(def.color, Math.max(160, k.dur), k.flashA);
+  playSpellSound(name);
 }
 
 // =========================================================================
@@ -421,14 +671,28 @@ function updateWand() {
   const dx = knuckle.x - wrist.x, dy = knuckle.y - wrist.y;
   const handLen = Math.hypot(dx, dy) + 1e-3;
   const dirX = dx / handLen, dirY = dy / handLen;
-  // Base anchored at knuckle line; tip extended by user-adjustable reach
+  // Perpendicular axis (90° CCW)
+  const perpX = -dirY, perpY = dirX;
+  // Base anchored at knuckle line; tip = knuckle + reach·forward + perp·perpendicular
   const base = { x: knuckle.x, y: knuckle.y };
-  const tip = { x: knuckle.x + dirX * handLen * WAND_REACH,
-                y: knuckle.y + dirY * handLen * WAND_REACH };
+  const tip = {
+    x: knuckle.x + dirX * handLen * WAND_REACH + perpX * handLen * WAND_PERP,
+    y: knuckle.y + dirY * handLen * WAND_REACH + perpY * handLen * WAND_PERP
+  };
+  // Update wand direction so spells fire from base toward tip (handles perp offset)
+  const tdx = tip.x - base.x, tdy = tip.y - base.y;
+  const tlen = Math.hypot(tdx, tdy) + 1e-3;
+  state._spellDir = { x: tdx / tlen, y: tdy / tlen };
+  state._handLen = handLen;
+  state._knuckle = knuckle;
+  state._fwd = { x: dirX, y: dirY };
+  state._perp = { x: perpX, y: perpY };
 
   state.wandBase = base;
   state.wandTip = tip;
-  state.wandDir = { x: dirX, y: dirY };
+  // Spells follow the actual base→tip vector so any perpendicular calibration
+  // correctly aims spells where the wand visually points.
+  state.wandDir = state._spellDir;
   state.handPts = pts;
 
   // History + speed
@@ -466,6 +730,24 @@ function fireSpell(name, def) {
   const tip = { ...state.wandTip };
   const dir = { ...state.wandDir };
   const t = millis();
+
+  applySpellKick(name, def);
+
+  // Cast burst — small forward puff from wand tip
+  state.effects.push({
+    kind: 'castBurst', color: def.color, origin: { ...tip }, dir,
+    bornAt: t, life: 280,
+    particles: Array.from({length: 18}, () => {
+      const a = Math.random() * Math.PI * 2;
+      const s = 1 + Math.random() * 4;
+      return {
+        x: tip.x, y: tip.y,
+        vx: dir.x * (3 + Math.random()*4) + Math.cos(a) * s,
+        vy: dir.y * (3 + Math.random()*4) + Math.sin(a) * s,
+        life: 1, size: 2 + Math.random()*3
+      };
+    })
+  });
 
   switch (def.type) {
     case 'beam':
@@ -594,6 +876,32 @@ function updateDummies() {
       if (d.respawnAt && t > d.respawnAt) Object.assign(d, makeDummy());
       continue;
     }
+    // Avada Kedavra slow death — fade and slump while still "alive" briefly
+    if (d.dyingAt) {
+      const age = t - d.dyingAt;
+      if (age > d.dyingDuration) {
+        d.alive = false;
+        d.deadAt = t;
+        d.respawnAt = t + 4000;
+        continue;
+      }
+      // slump: drift down + slight rotation, slow horizontal drift
+      d.vx *= 0.92; d.vy *= 0.92;
+      d.y += 0.4 + age * 0.0015;
+      // emit rising death sparks
+      if (Math.random() < 0.4) {
+        state.effects.push({
+          kind: 'particle', color: d.deathColor, origin: { x: d.x, y: d.y },
+          bornAt: t, life: 900,
+          particles: [{
+            x: d.x + (Math.random()-0.5)*40, y: d.y + (Math.random()-0.5)*60,
+            vx: (Math.random()-0.5)*0.4, vy: -1.2 - Math.random()*1.5,
+            life: 1, size: 1.5 + Math.random()*2
+          }]
+        });
+      }
+      continue;
+    }
     if (d.frozenUntil > t) {
       // Frozen: no motion
       d.vx *= 0.7; d.vy *= 0.7;
@@ -631,10 +939,39 @@ function updateDummies() {
   }
 }
 
-function killDummy(d, color) {
+function killDummy(d, color, isAvada=false) {
+  if (isAvada) {
+    // Slow-motion death: keep alive but mark dyingAt; updateDummies handles fade
+    d.dyingAt = millis();
+    d.deathColor = color;
+    d.dyingDuration = 1100;
+    triggerShake(22, 700);
+    triggerFlash(color, 350, 0.7);
+    playImpactSound('avada kedavra');
+    // Big radial shockwave
+    state.effects.push({
+      kind: 'shockwave', color, origin: { x: d.x, y: d.y },
+      bornAt: millis(), life: 800, maxRadius: 280
+    });
+    // Energy ribbons rising
+    state.effects.push({
+      kind: 'deathRibbons', color, origin: { x: d.x, y: d.y },
+      bornAt: millis(), life: 1100,
+      ribbons: Array.from({length: 14}, () => ({
+        x: d.x + (Math.random()-0.5)*30,
+        y: d.y + (Math.random()-0.5)*40,
+        vx: (Math.random()-0.5)*0.6,
+        vy: -1.5 - Math.random()*1.8,
+        phase: Math.random() * Math.PI * 2,
+        life: 1
+      }))
+    });
+    return;
+  }
   d.alive = false;
   d.deadAt = millis();
   d.respawnAt = millis() + 4000;
+  triggerShake(8, 250);
   state.effects.push({
     kind: 'burst', color, origin: { x: d.x, y: d.y },
     bornAt: millis(), life: 1200,
@@ -642,6 +979,27 @@ function killDummy(d, color) {
       const a = Math.random() * Math.PI * 2;
       const s = 2 + Math.random() * 6;
       return { x: d.x, y: d.y, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: 1, size: 2 + Math.random()*3 };
+    })
+  });
+  state.effects.push({
+    kind: 'shockwave', color, origin: { x: d.x, y: d.y },
+    bornAt: millis(), life: 500, maxRadius: 140
+  });
+}
+
+function spawnImpact(x, y, color) {
+  triggerShake(5, 180);
+  playImpactSound('impact');
+  state.effects.push({
+    kind: 'shockwave', color, origin: { x, y },
+    bornAt: millis(), life: 360, maxRadius: 90
+  });
+  state.effects.push({
+    kind: 'burst', color, origin: { x, y }, bornAt: millis(), life: 700,
+    particles: Array.from({length: 20}, () => {
+      const a = Math.random() * Math.PI * 2;
+      const s = 1 + Math.random() * 4;
+      return { x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: 1, size: 1.5 + Math.random()*2 };
     })
   });
 }
@@ -764,8 +1122,12 @@ function applySpellHit(e, d) {
   const def = SPELLS[e.spell];
   if (!def) return;
   if (def.type === 'beam' && e.spell === 'avada kedavra') {
-    killDummy(d, e.color);
-  } else if (def.type === 'beam') {
+    killDummy(d, e.color, true);
+    return;
+  }
+  // Generic on-target impact (shockwave + ember burst)
+  spawnImpact(d.x, d.y, def.color || e.color);
+  if (def.type === 'beam') {
     d.health -= def.damage;
     if (def.color) d.lastHitColor = def.color;
     if (d.health <= 0) killDummy(d, def.color);
@@ -778,7 +1140,7 @@ function applySpellHit(e, d) {
     d.health -= def.damage;
     if (d.health <= 0) killDummy(d, def.color);
   } else if (def.type === 'water') {
-    if (d.burnUntil > t) d.burnUntil = 0; // douse fire
+    if (d.burnUntil > t) d.burnUntil = 0;
     d.vy += 1; d.vx += e.dir.x * 1.5;
   } else if (def.type === 'ice') {
     d.frozenUntil = t + 3500;
@@ -797,12 +1159,20 @@ function draw() {
   updateDummies();
   updateEffects();
 
-  // Render order: dummies → effects → wand → shield → arm UI
+  // Apply screen shake to the gameplay layer (everything except bg + flash)
+  ctx.save();
+  applyShake(ctx);
+
   drawDummies(ctx);
   drawEffects(ctx);
   drawWand(ctx);
   drawShield(ctx);
   if (state.armedSpell) drawArmingAura(ctx);
+
+  ctx.restore();
+
+  // Flash on top so it covers shaken content too
+  drawFlash(ctx);
 }
 
 function drawBackground(ctx) {
@@ -916,6 +1286,21 @@ function drawDummies(ctx) {
   for (const d of state.dummies) {
     if (!d.alive) continue;
     ctx.save();
+    // Avada Kedavra fade: dim opacity + slight rotation
+    if (d.dyingAt) {
+      const age = t - d.dyingAt;
+      const f = Math.max(0, 1 - age / d.dyingDuration);
+      ctx.globalAlpha = f;
+      ctx.translate(d.x, d.y);
+      ctx.rotate((1 - f) * 0.35);
+      ctx.translate(-d.x, -d.y);
+      // green energy aura around dying body
+      ctx.shadowBlur = 36; ctx.shadowColor = d.deathColor;
+      ctx.fillStyle = d.deathColor;
+      ctx.globalAlpha = f * 0.35;
+      ctx.beginPath(); ctx.ellipse(d.x, d.y, 70, 90, 0, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = f;
+    }
     // Cloaked figure: tall hood shape
     const w = 60, h = 110;
     const cx = d.x, cy = d.y;
@@ -1017,22 +1402,57 @@ function drawEffects(ctx) {
         ctx.shadowBlur = 18; ctx.shadowColor = e.color;
         ctx.fillStyle = e.color;
         ctx.globalAlpha = p.life;
-        ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(p.x, p.y, 4 * p.life + 1, 0, Math.PI*2); ctx.fill();
       }
       ctx.globalAlpha = 1;
-      // beam line
-      ctx.shadowBlur = 30; ctx.shadowColor = e.color;
+      // outer wide glow pass
+      ctx.shadowBlur = 36; ctx.shadowColor = e.color;
       ctx.strokeStyle = e.color;
+      ctx.lineWidth = 14;
+      ctx.globalAlpha = 0.45;
+      ctx.beginPath(); ctx.moveTo(e.origin.x, e.origin.y); ctx.lineTo(tipX, tipY); ctx.stroke();
+      // mid colored core
+      ctx.globalAlpha = 1;
+      ctx.shadowBlur = 24;
       ctx.lineWidth = 6;
       ctx.beginPath(); ctx.moveTo(e.origin.x, e.origin.y); ctx.lineTo(tipX, tipY); ctx.stroke();
+      // bright white inner core
       ctx.shadowBlur = 8; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(e.origin.x, e.origin.y); ctx.lineTo(tipX, tipY); ctx.stroke();
-      // head explosion if killing
-      if (e.spell === 'avada kedavra') {
-        ctx.shadowBlur = 40; ctx.shadowColor = e.color;
-        ctx.fillStyle = e.color;
-        ctx.beginPath(); ctx.arc(tipX, tipY, 14 + Math.sin(t*0.04)*4, 0, Math.PI*2); ctx.fill();
+
+      // Helical energy wrap — two phase-shifted sine ribbons around the beam
+      const len = Math.hypot(tipX - e.origin.x, tipY - e.origin.y);
+      const segs = Math.max(8, Math.floor(len / 14));
+      const perpX = -e.dir.y, perpY = e.dir.x;
+      const baseAmp = e.spell === 'avada kedavra' ? 14 : 9;
+      for (let pass = 0; pass < 2; pass++) {
+        ctx.shadowBlur = 16; ctx.shadowColor = e.color;
+        ctx.strokeStyle = e.color; ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        for (let i = 0; i <= segs; i++) {
+          const f = i / segs;
+          const baseX = lerp(e.origin.x, tipX, f);
+          const baseY = lerp(e.origin.y, tipY, f);
+          const amp = baseAmp * Math.sin(f * Math.PI); // taper to ends
+          const phase = f * Math.PI * 4 + t * 0.025 + pass * Math.PI;
+          const off = Math.sin(phase) * amp;
+          const x = baseX + perpX * off, y = baseY + perpY * off;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
       }
+      ctx.globalAlpha = 1;
+
+      // head halo at the leading edge
+      ctx.shadowBlur = 40; ctx.shadowColor = e.color;
+      ctx.fillStyle = e.color;
+      const haloR = e.spell === 'avada kedavra'
+        ? 16 + Math.sin(t*0.04)*4
+        : 9 + Math.sin(t*0.05)*2;
+      ctx.beginPath(); ctx.arc(tipX, tipY, haloR, 0, Math.PI*2); ctx.fill();
+      ctx.shadowBlur = 12; ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(tipX, tipY, haloR * 0.4, 0, Math.PI*2); ctx.fill();
     } else if (e.kind === 'slash') {
       ctx.shadowBlur = 30; ctx.shadowColor = e.color;
       ctx.strokeStyle = e.color; ctx.lineWidth = 5;
@@ -1119,6 +1539,43 @@ function drawEffects(ctx) {
       ctx.moveTo(e.origin.x, e.origin.y);
       ctx.lineTo(e.origin.x + dir.x * len * e.dirSign, e.origin.y + dir.y * len * e.dirSign);
       ctx.stroke();
+    } else if (e.kind === 'shockwave') {
+      const f = age / e.life;
+      const r = (e.maxRadius || 200) * f;
+      ctx.shadowBlur = 28; ctx.shadowColor = e.color;
+      ctx.strokeStyle = e.color; ctx.lineWidth = 5 * (1 - f);
+      ctx.globalAlpha = (1 - f) * 0.95;
+      ctx.beginPath(); ctx.arc(e.origin.x, e.origin.y, r, 0, Math.PI*2); ctx.stroke();
+      // softer second ring
+      ctx.lineWidth = 2 * (1 - f);
+      ctx.globalAlpha = (1 - f) * 0.5;
+      ctx.beginPath(); ctx.arc(e.origin.x, e.origin.y, r * 1.18, 0, Math.PI*2); ctx.stroke();
+    } else if (e.kind === 'castBurst') {
+      for (const p of e.particles) {
+        p.x += p.vx; p.y += p.vy;
+        p.vx *= 0.9; p.vy *= 0.9;
+        p.life -= 0.06;
+        if (p.life <= 0) continue;
+        ctx.shadowBlur = 16; ctx.shadowColor = e.color;
+        ctx.fillStyle = e.color;
+        ctx.globalAlpha = p.life;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI*2); ctx.fill();
+      }
+    } else if (e.kind === 'deathRibbons') {
+      for (const r of e.ribbons) {
+        r.x += r.vx + Math.sin((t + r.phase*100) * 0.005) * 0.6;
+        r.y += r.vy;
+        r.vy *= 0.99;
+        r.life -= 0.012;
+        if (r.life <= 0) continue;
+        ctx.shadowBlur = 22; ctx.shadowColor = e.color;
+        ctx.fillStyle = e.color;
+        ctx.globalAlpha = r.life * 0.9;
+        ctx.beginPath(); ctx.arc(r.x, r.y, 3 + r.life * 3, 0, Math.PI*2); ctx.fill();
+        ctx.shadowBlur = 8; ctx.fillStyle = '#ffffff';
+        ctx.globalAlpha = r.life * 0.7;
+        ctx.beginPath(); ctx.arc(r.x, r.y, 1.5 + r.life * 1.5, 0, Math.PI*2); ctx.fill();
+      }
     }
     ctx.globalAlpha = 1;
     ctx.restore();

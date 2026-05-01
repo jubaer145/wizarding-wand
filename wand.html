@@ -329,7 +329,7 @@ function projectToHandLocal(mx, my) {
 }
 
 function beginCalibration() {
-  if (!state.wandBase) { setStatus('Show your wand hand first'); return; }
+  if (!state.wandBase) { setStatus('Show your wand hand first'); state._statusWasHandPrompt = true; return; }
   state.calibrating = true;
   state.calibrateDrag = null;
   const el = document.getElementById('calOverlay');
@@ -839,6 +839,11 @@ function updateWand() {
       state.latestResults.multiHandLandmarks.length === 0) {
     state.wandTip = null; state.wandBase = null; return;
   }
+  // Hand is back in frame — clear the calibration prompt if it stuck
+  if (state._statusWasHandPrompt) {
+    setStatus('Speak. Then flick.');
+    state._statusWasHandPrompt = false;
+  }
   const lmRaw = state.latestResults.multiHandLandmarks[0];
   const rawPts = lmRaw.map(p => ({ x: (1 - p.x) * width, y: p.y * height }));
 
@@ -980,36 +985,31 @@ function fireSpell(name, def) {
     case 'patronus': {
       // Random: stag (with antlers) or doe (no antlers)
       const variant = Math.random() < 0.5 ? 'stag' : 'doe';
-      // Path stays inside the visible canvas. Deer launches in the wand
-      // direction, arcs gracefully through the upper-center area, and
-      // dissipates at a visible end-point — never goes off-screen.
       const startX = tip.x, startY = tip.y;
-      const margin = Math.min(width, height) * 0.15;
-      // pick the side opposite the wand orientation to give a nice sweep
-      const sideSign = dir.x !== 0 ? Math.sign(dir.x) : (Math.random() < 0.5 ? -1 : 1);
-      // End at upper area on opposite side, fully inside viewport
-      const endX = clamp(width/2 - sideSign * (width*0.25 + Math.random()*width*0.1), margin, width - margin);
-      const endY = clamp(height * (0.25 + Math.random()*0.2), margin, height - margin);
-      // Mid-screen apex above the user, in viewport
-      const midApexY = clamp(height * 0.18 + Math.random()*40, margin, height*0.45);
-      const midApexX = clamp((startX + endX) / 2 + (Math.random()-0.5) * width * 0.15, margin, width - margin);
-      // Control points pull the curve through the apex
-      const ctrl1X = clamp(startX + dir.x * 220 + (Math.random()-0.5) * 80, margin, width - margin);
-      const ctrl1Y = clamp(startY + dir.y * 220 - 80, margin, height - margin);
-      const ctrl2X = clamp(midApexX + sideSign * 80, margin, width - margin);
-      const ctrl2Y = clamp(midApexY - 40, margin, height - margin);
+      // Orbit center somewhere in the central viewport area; offset slightly
+      // away from the user so it gallops "in front of" them.
+      const orbitCenter = {
+        x: clamp(width * 0.5 + (Math.random() - 0.5) * width * 0.12,
+                 width * 0.3, width * 0.7),
+        y: clamp(height * 0.42 + (Math.random() - 0.5) * height * 0.08,
+                 height * 0.32, height * 0.55)
+      };
+      const orbitR = Math.min(width, height) * 0.22;
+      // Initial orbit angle chosen so the launch lerp meets the closest
+      // point on the orbit ellipse, giving a graceful entry.
+      const dxL = startX - orbitCenter.x, dyL = startY - orbitCenter.y;
+      const initAngle = Math.atan2(dyL / 0.55, dxL);
+      // 1.5 full revolutions, sign chosen so the deer enters tangentially
+      // toward the wand's pointing direction.
+      const revolutionDir = (dir.x * -Math.sin(initAngle) + dir.y * Math.cos(initAngle)) > 0 ? 1 : -1;
       state.effects.push({
         kind: 'patronusAnimal', variant, color: '#e8f8ff',
-        bornAt: t, life: 7800,
-        path: {
-          p0: {x:startX, y:startY},
-          c1: {x:ctrl1X, y:ctrl1Y},
-          c2: {x:ctrl2X, y:ctrl2Y},
-          p1: {x:endX,   y:endY}
-        },
+        bornAt: t, life: 7000,
+        startPos: { x: startX, y: startY },
+        orbitCenter, orbitR, initAngle, revolutionDir,
         animPhase: 0,
         wisps: [],
-        trail: [],   // motion-blur ghosts {x,y,dirX,dirY,age}
+        trail: [],
         lastPos: { x: startX, y: startY },
         birthBurst: Array.from({length: 50}, () => {
           const a = Math.random() * Math.PI * 2; const s = 1 + Math.random()*5;
@@ -1357,36 +1357,32 @@ function updateEffects() {
       }
     } else if (e.kind === 'patronusAnimal') {
       e.animPhase += 0.22;
-      const fLin = age / e.life;
-      // Ease: slow start, slow end (deer pauses mid-screen for visibility)
-      // Smoothstep with a slight hold around 0.5
-      const f01 = Math.min(0.999, fLin);
-      const fEased = f01 * f01 * (3 - 2 * f01); // smoothstep
-      const t01 = fEased;
-      const pos = bezierPoint(e.path, t01);
-      const tan = bezierTangent(e.path, t01);
+      const tNorm = Math.min(0.999, age / e.life);
+      const pos = patronusPathPos(e, tNorm);
+      const tan = patronusPathDir(e, tNorm);
       const size = Math.min(width, height) * 0.22;
 
-      // Edge wisps spawned along the body silhouette
-      spawnEdgeWisps(e, pos, tan.x, tan.y, size);
-
-      while (e.wisps.length > 360) e.wisps.shift();
+      // Stray-mist particles drifting away from body
+      for (let k = 0; k < 2; k++) {
+        e.wisps.push({
+          x: pos.x + (Math.random() - 0.5) * size * 0.8,
+          y: pos.y + (Math.random() - 0.5) * size * 1.2,
+          vx: (Math.random() - 0.5) * 0.5,
+          vy: -0.3 - Math.random() * 0.6,
+          life: 1, size: 1 + Math.random() * 1.6
+        });
+      }
+      while (e.wisps.length > 220) e.wisps.shift();
       for (const w of e.wisps) {
         w.x += w.vx; w.y += w.vy;
         w.vy *= 0.99;
-        w.life -= 0.014;
+        w.life -= 0.018;
       }
-
-      // Motion-blur trail: store last position every frame, decay
-      e.trail.push({ x: pos.x, y: pos.y, dirX: tan.x, dirY: tan.y, age: 0, animPhase: e.animPhase });
-      if (e.trail.length > 6) e.trail.shift();
-      for (const tr of e.trail) tr.age += 1;
 
       e.lastPos = pos;
       e.curPos = pos;
       e.curDir = tan;
       e.curSize = size;
-      // Update birth burst
       if (e.birthBurst) {
         for (const p of e.birthBurst) {
           p.x += p.vx; p.y += p.vy;
@@ -1696,6 +1692,218 @@ function drawDummies(ctx) {
 }
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// Patronus parametric path: short launch → 1.5 orbital revolutions →
+// inward spiral as it dissolves. Stays inside the central viewport area.
+function patronusPathPos(e, t) {
+  const launchEnd = 0.18;
+  if (t < launchEnd) {
+    const f = t / launchEnd;
+    const ease = f * f * (3 - 2 * f); // smoothstep in
+    const ax = e.orbitCenter.x + e.orbitR * Math.cos(e.initAngle);
+    const ay = e.orbitCenter.y + e.orbitR * 0.55 * Math.sin(e.initAngle);
+    return {
+      x: e.startPos.x + (ax - e.startPos.x) * ease,
+      y: e.startPos.y + (ay - e.startPos.y) * ease
+    };
+  }
+  const f = (t - launchEnd) / (1 - launchEnd);
+  // 1.5 revolutions
+  const angle = e.initAngle + e.revolutionDir * f * Math.PI * 3;
+  // Last 25%: contract radius for inward spiral
+  const radiusScale = f > 0.75 ? (1 - (f - 0.75) / 0.25 * 0.55) : 1;
+  return {
+    x: e.orbitCenter.x + e.orbitR * radiusScale * Math.cos(angle),
+    y: e.orbitCenter.y + e.orbitR * 0.55 * radiusScale * Math.sin(angle)
+  };
+}
+function patronusPathDir(e, t) {
+  const a = patronusPathPos(e, Math.max(0, t - 0.003));
+  const b = patronusPathPos(e, Math.min(1, t + 0.003));
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const m = Math.hypot(dx, dy) || 1;
+  return { x: dx / m, y: dy / m };
+}
+
+// === Patronus particle cloud ===
+// Sample points inside the deer silhouette by rasterizing the body path
+// to an offscreen canvas, then rejection-sampling pixels with non-zero
+// alpha. Each point is tagged with its body region for animation.
+let _deerPointCloud = null;
+function getDeerPointCloud() {
+  if (_deerPointCloud) return _deerPointCloud;
+  const W = 240, H = 200;
+  const off = document.createElement('canvas');
+  off.width = W; off.height = H;
+  const oc = off.getContext('2d');
+  // Local body bbox covers x ∈ [-0.7, 1.3], y ∈ [-0.85, 0.55]
+  // map: x' = (x + 0.7) / 2.0 * W; y' = (y + 0.85) / 1.4 * H
+  const sx = W / 2.0, sy = H / 1.4;
+  oc.translate(0.7 * sx, 0.85 * sy);
+  oc.scale(sx, sy);
+  // Render body solid white
+  oc.fillStyle = '#fff';
+  oc.fill(deerBodyPath());
+  // Add legs as thick strokes so leg particles populate a recognisable shape
+  oc.strokeStyle = '#fff';
+  oc.lineWidth = 0.10;
+  oc.lineCap = 'round';
+  const legAnchors = [
+    { x:  0.42, y: 0.02 },
+    { x:  0.36, y: 0.04 },
+    { x: -0.32, y: 0.04 },
+    { x: -0.38, y: 0.06 }
+  ];
+  for (const a of legAnchors) {
+    oc.beginPath();
+    oc.moveTo(a.x, a.y);
+    oc.lineTo(a.x, a.y + 0.46);
+    oc.stroke();
+  }
+  // Antler region — separate stroked path so we know which points are antlers
+  // Draw in a different color (red channel) so we can detect antler region by red>blue
+  oc.strokeStyle = 'rgba(255, 0, 0, 1)';
+  oc.lineWidth = 0.045;
+  // Two slightly offset antler beams + tines
+  const drawAntlerSet = (offX) => {
+    oc.beginPath();
+    oc.moveTo(0.95 + offX, -0.78);
+    oc.bezierCurveTo(0.93 + offX, -0.95, 0.97 + offX, -1.10, 1.02 + offX, -1.22);
+    oc.stroke();
+    oc.beginPath();
+    oc.moveTo(0.95 + offX, -0.84); oc.quadraticCurveTo(1.10 + offX, -0.92, 1.22 + offX, -0.94); oc.stroke();
+    oc.beginPath();
+    oc.moveTo(0.96 + offX, -0.96); oc.quadraticCurveTo(1.14 + offX, -1.02, 1.28 + offX, -1.05); oc.stroke();
+    oc.beginPath();
+    oc.moveTo(0.94 + offX, -1.02); oc.quadraticCurveTo(0.78 + offX, -1.10, 0.66 + offX, -1.16); oc.stroke();
+    oc.beginPath();
+    oc.moveTo(1.02 + offX, -1.22); oc.lineTo(0.92 + offX, -1.36); oc.stroke();
+    oc.beginPath();
+    oc.moveTo(1.02 + offX, -1.22); oc.lineTo(1.10 + offX, -1.38); oc.stroke();
+    oc.beginPath();
+    oc.moveTo(1.02 + offX, -1.22); oc.lineTo(1.18 + offX, -1.30); oc.stroke();
+  };
+  drawAntlerSet(0.02);
+  drawAntlerSet(-0.04);
+
+  // We need antler region accessible — but the antler bbox extends above
+  // y=-0.85 so we redo with an extended canvas
+  // Re-create with taller canvas to fit antlers
+  const W2 = 240, H2 = 280;
+  const off2 = document.createElement('canvas');
+  off2.width = W2; off2.height = H2;
+  const oc2 = off2.getContext('2d');
+  const sx2 = W2 / 2.0, sy2 = H2 / 2.0; // y ∈ [-1.4, 0.6]
+  oc2.translate(0.7 * sx2, 1.4 * sy2);
+  oc2.scale(sx2, sy2);
+  oc2.fillStyle = 'rgba(0, 200, 255, 1)';
+  oc2.fill(deerBodyPath());
+  oc2.strokeStyle = 'rgba(0, 200, 255, 1)';
+  oc2.lineWidth = 0.10;
+  oc2.lineCap = 'round';
+  for (const a of legAnchors) {
+    oc2.beginPath();
+    oc2.moveTo(a.x, a.y);
+    oc2.lineTo(a.x, a.y + 0.46);
+    oc2.stroke();
+  }
+  oc2.strokeStyle = 'rgba(255, 80, 80, 1)';
+  oc2.lineWidth = 0.045;
+  drawAntlerSet(0.02);
+  drawAntlerSet(-0.04);
+
+  // Sample points: read pixel data, rejection sample
+  const data = oc2.getImageData(0, 0, W2, H2).data;
+  const points = [];
+  for (let i = 0; i < 12000 && points.length < 700; i++) {
+    const px = Math.floor(Math.random() * W2);
+    const py = Math.floor(Math.random() * H2);
+    const idx = (py * W2 + px) * 4;
+    const r = data[idx], g = data[idx + 1], b = data[idx + 2], a = data[idx + 3];
+    if (a < 100) continue;
+    // Map back to local coords
+    const lx = px / sx2 - 0.7;
+    const ly = py / sy2 - 1.4;
+    let region = 'body';
+    if (r > g && r > b) region = 'antler';
+    else if (ly > 0.0) region = 'leg';
+    else if (lx > 0.55 && ly < -0.4) region = 'head';
+    points.push({
+      x: lx, y: ly,
+      size: 0.5 + Math.random() * 1.4,
+      phase: Math.random() * Math.PI * 2,
+      region,
+      // for legs, store horizontal half (front vs hind) for gallop sync
+      legSide: lx > 0 ? 'front' : 'hind',
+      antlerOnly: region === 'antler'
+    });
+  }
+  _deerPointCloud = points;
+  return points;
+}
+
+// Render the deer as a swarm of glowing particles. Body, head, legs and
+// antlers are all the same point cloud — only motion differs by region.
+function drawDeerCloud(ctx, x, y, size, dirX, dirY, withAntlers, animPhase, alpha, t) {
+  const cloud = getDeerPointCloud();
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(Math.atan2(dirY, dirX));
+  ctx.scale(size, size);
+
+  for (const p of cloud) {
+    if (p.antlerOnly && !withAntlers) continue;
+
+    let lx = p.x, ly = p.y;
+
+    // Region-specific motion
+    if (p.region === 'leg') {
+      const phase = p.legSide === 'front' ? animPhase : animPhase + Math.PI;
+      const swing = Math.sin(phase + p.phase * 0.3) * 0.08;
+      const lift = Math.max(0, Math.sin(phase + p.phase * 0.3)) * 0.08;
+      const f = (ly - 0.0) / 0.5; // 0 at top of leg, 1 at hoof
+      lx += swing * f;
+      ly -= lift * f * 0.4;
+    } else if (p.region === 'head' || p.region === 'antler') {
+      const bob = Math.sin(animPhase * 0.7) * 0.025;
+      ly += bob;
+    } else {
+      // Body breathing/shimmer
+      const shimmer = Math.sin(t * 0.005 + p.phase * 1.7) * 0.012;
+      ly += shimmer;
+    }
+
+    // Per-particle drift wobble
+    lx += Math.sin(t * 0.003 + p.phase) * 0.014;
+    ly += Math.cos(t * 0.003 + p.phase * 1.3) * 0.011;
+
+    // Twinkle: each particle's intensity oscillates on its own phase
+    const twinkle = 0.55 + 0.45 * Math.sin(t * 0.011 + p.phase * 2);
+    const a = alpha * twinkle;
+    if (a < 0.03) continue;
+
+    const pxScreen = lx, pyScreen = ly;
+    // Outer halo
+    ctx.shadowBlur = 12 / size;
+    ctx.shadowColor = '#cce8ff';
+    ctx.globalAlpha = a * 0.55;
+    ctx.fillStyle = '#9fc8ff';
+    ctx.beginPath();
+    ctx.arc(pxScreen, pyScreen, p.size * 1.6 / size, 0, Math.PI * 2);
+    ctx.fill();
+    // Bright core
+    ctx.shadowBlur = 6 / size;
+    ctx.shadowColor = '#ffffff';
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(pxScreen, pyScreen, p.size * 0.85 / size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
 
 // Cubic Bézier evaluation
 function bezierPoint(path, t) {
@@ -2035,38 +2243,21 @@ function drawEffects(ctx) {
       }
     } else if (e.kind === 'patronusAnimal') {
       const f = age / e.life;
-
-      // Use the eased current position from updateEffects
-      const pos = e.curPos || bezierPoint(e.path, Math.min(0.99, f));
-      const tan = e.curDir || bezierTangent(e.path, Math.min(0.99, f));
+      const pos = e.curPos || patronusPathPos(e, Math.min(0.999, f));
+      const tan = e.curDir || patronusPathDir(e, Math.min(0.999, f));
       const size = e.curSize || (Math.min(width, height) * 0.22);
 
-      // Switch to additive blending for ethereal "made of light" feel
-      ctx.save();
-      ctx.globalCompositeOperation = 'screen';
-
-      // === Wisp aura behind everything ===
+      // Drifting mist wisps (drawn first, behind the body)
       for (const w of e.wisps) {
         if (w.life <= 0) continue;
-        ctx.shadowBlur = 18; ctx.shadowColor = '#cce8ff';
-        ctx.globalAlpha = w.life * 0.55;
-        ctx.fillStyle = '#9fc8ff';
-        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life * 2.4, 0, Math.PI*2); ctx.fill();
+        ctx.shadowBlur = 14; ctx.shadowColor = '#cce8ff';
+        ctx.globalAlpha = w.life * 0.6;
+        ctx.fillStyle = '#bcdeff';
+        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life * 1.4, 0, Math.PI*2); ctx.fill();
       }
       ctx.globalAlpha = 1;
 
-      // === Motion-blur trail: ghosts of recent positions ===
-      if (e.trail && e.trail.length > 1) {
-        for (let ti = 0; ti < e.trail.length - 1; ti++) {
-          const tr = e.trail[ti];
-          const ghostAlpha = (ti / e.trail.length) * 0.18;
-          if (ghostAlpha < 0.01) continue;
-          drawDeer(ctx, tr.x, tr.y, size, tr.dirX, tr.dirY,
-                   e.variant === 'stag', tr.animPhase, ghostAlpha);
-        }
-      }
-
-      // === Birth burst (concentrated white flash near origin) ===
+      // Birth burst at the wand tip — bright flash where it emerged
       if (e.birthBurst) {
         for (const p of e.birthBurst) {
           if (p.life <= 0) continue;
@@ -2078,24 +2269,13 @@ function drawEffects(ctx) {
         ctx.globalAlpha = 1;
       }
 
-      // === The deer itself ===
+      // The deer particle cloud — main reveal
       let mainAlpha = 1;
-      if (f < 0.10) mainAlpha = f / 0.10;
+      if (f < 0.08) mainAlpha = f / 0.08;
       else if (f > 0.85) mainAlpha = (1 - f) / 0.15;
       mainAlpha = Math.max(0, Math.min(1, mainAlpha));
-      drawDeer(ctx, pos.x, pos.y, size, tan.x, tan.y,
-               e.variant === 'stag', e.animPhase, mainAlpha);
-
-      // === Bright sharp wisps in front (over deer) ===
-      for (const w of e.wisps) {
-        if (w.life <= 0) continue;
-        ctx.shadowBlur = 14; ctx.shadowColor = '#ffffff';
-        ctx.globalAlpha = w.life * 0.85;
-        ctx.fillStyle = '#ffffff';
-        ctx.beginPath(); ctx.arc(w.x, w.y, w.size * w.life, 0, Math.PI*2); ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-      ctx.restore();
+      drawDeerCloud(ctx, pos.x, pos.y, size, tan.x, tan.y,
+                    e.variant === 'stag', e.animPhase, mainAlpha, t);
     } else if (e.kind === 'sparkle' || e.kind === 'burst' || e.kind === 'particle') {
       for (const p of e.particles) {
         if (p.life <= 0) continue;

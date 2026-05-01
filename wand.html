@@ -121,7 +121,7 @@
   <div><span class="spell">Alohomora / Reparo</span> <span class="effect">— sparkle</span></div>
   <div style="margin-top:6px; color: #886; font-size: 10px; font-style: italic;">
     Speak the incantation, then flick to cast.<br>
-    <b>K</b> drag base→tip aligns wand. <b>R</b> resets.<br>
+    <b>K</b> drag base→tip aligns. <b>R</b> reset. <b>D</b> debug.<br>
     <b>M</b> music · <b>A</b> ambient · "Mischief Managed" clears.
   </div>
 </div>
@@ -275,9 +275,42 @@ try {
 
 state.calibrating = false;
 state.calibrateDrag = null; // {ax, ay, bx, by} during drag
+state.calibrateSamples = null; // [{baseLocal, tipLocal}, ...] during drag for averaging
 state.smoothedLm = null;    // smoothed landmarks for stable rendering
+state.lmFilters = null;     // One Euro filter state per landmark per axis
 state.musicEnabled = true;
 state.musicStarted = false;
+state.debugLandmarks = false;
+
+// One Euro filter (Casiez/Roussel/Vogel 2012) — adaptive low-pass
+// minCutoff: cutoff at zero velocity (lower = smoother when still)
+// beta: how fast cutoff rises with velocity (higher = more responsive when moving)
+const ONE_EURO_MIN_CUTOFF = 1.4;
+const ONE_EURO_BETA       = 0.06;
+const ONE_EURO_DCUTOFF    = 1.0;
+function oneEuroAlpha(cutoff, dt) {
+  const tau = 1.0 / (2 * Math.PI * cutoff);
+  return 1.0 / (1.0 + tau / dt);
+}
+function oneEuro(filt, value, timeMs,
+                 minCutoff = ONE_EURO_MIN_CUTOFF,
+                 beta = ONE_EURO_BETA,
+                 dCutoff = ONE_EURO_DCUTOFF) {
+  if (filt.val === null) {
+    filt.val = value; filt.dx = 0; filt.lastT = timeMs;
+    return value;
+  }
+  const dt = (timeMs - filt.lastT) / 1000.0;
+  if (dt <= 0) return filt.val;
+  const dx = (value - filt.val) / dt;
+  const dxAlpha = oneEuroAlpha(dCutoff, dt);
+  filt.dx = filt.dx + dxAlpha * (dx - filt.dx);
+  const cutoff = minCutoff + beta * Math.abs(filt.dx);
+  const valAlpha = oneEuroAlpha(cutoff, dt);
+  filt.val = filt.val + valAlpha * (value - filt.val);
+  filt.lastT = timeMs;
+  return filt.val;
+}
 
 // =========================================================================
 // p5 SETUP
@@ -306,6 +339,10 @@ function keyPressed() {
   else if (key === 'm' || key === 'M') toggleMusic();
   else if (key === 'a' || key === 'A') toggleAmbient();
   else if (key === 'r' || key === 'R') resetCalibration();
+  else if (key === 'd' || key === 'D') {
+    state.debugLandmarks = !state.debugLandmarks;
+    setStatus(state.debugLandmarks ? 'Landmarks on (D)' : 'Landmarks off');
+  }
 }
 function resetCalibration() {
   WAND_BASE_REACH = 0; WAND_BASE_PERP = 0;
@@ -348,18 +385,21 @@ function beginCalibration() {
 function mousePressed() {
   if (!state.calibrating) return false;
   state.calibrateDrag = { ax: mouseX, ay: mouseY, bx: mouseX, by: mouseY };
+  state.calibrateSamples = [];
   return false;
 }
 function mouseDragged() {
   if (!state.calibrating || !state.calibrateDrag) return false;
   state.calibrateDrag.bx = mouseX;
   state.calibrateDrag.by = mouseY;
-  // Live preview: project endpoints into hand-local frame and update
-  // calibration in real-time so the user sees the rendered wand follow
-  // their drag. Values are saved on mouseReleased.
+  // Project endpoints into hand-local frame using the CURRENT (live)
+  // hand pose. Sample on every drag event; we'll average across all
+  // samples on release to wash out single-frame tracking jitter.
   const baseLocal = projectToHandLocal(state.calibrateDrag.ax, state.calibrateDrag.ay);
   const tipLocal  = projectToHandLocal(state.calibrateDrag.bx, state.calibrateDrag.by);
   if (baseLocal && tipLocal) {
+    state.calibrateSamples.push({ baseLocal, tipLocal });
+    // Live preview: use latest sample for instant feedback
     WAND_BASE_REACH = baseLocal.along;
     WAND_BASE_PERP  = baseLocal.perp;
     WAND_TIP_REACH  = tipLocal.along;
@@ -372,30 +412,47 @@ function mouseReleased() {
   if (!state.calibrating || !state.calibrateDrag) return false;
   const d = state.calibrateDrag;
   const dragDist = Math.hypot(d.bx - d.ax, d.by - d.ay);
-  // If user did just a single click (no drag), treat as tip-only legacy mode
   if (dragDist < 8) {
+    // Single click — set tip only
     const single = projectToHandLocal(d.ax, d.ay);
     if (single) {
       WAND_TIP_REACH = single.along;
       WAND_TIP_PERP  = single.perp;
-      // Leave base at current default unless the user also wants to recalibrate it
     }
   } else {
-    const baseLocal = projectToHandLocal(d.ax, d.ay);
-    const tipLocal  = projectToHandLocal(d.bx, d.by);
-    if (baseLocal && tipLocal) {
-      WAND_BASE_REACH = baseLocal.along;
-      WAND_BASE_PERP  = baseLocal.perp;
-      WAND_TIP_REACH  = tipLocal.along;
-      WAND_TIP_PERP   = tipLocal.perp;
+    // Drag — average all samples collected during the drag for robust
+    // calibration (washes out single-frame MediaPipe noise)
+    const samples = state.calibrateSamples || [];
+    const finalBase = projectToHandLocal(d.ax, d.ay);
+    const finalTip  = projectToHandLocal(d.bx, d.by);
+    if (finalBase) samples.push({ baseLocal: finalBase, tipLocal: finalTip });
+    if (samples.length > 0) {
+      // Trimmed mean: drop top/bottom 10% of each axis to reject outliers
+      const meanWith = (arr, key, axis) => {
+        const vals = arr.map(s => s[key][axis]).sort((a, b) => a - b);
+        const trim = Math.floor(vals.length * 0.1);
+        const kept = vals.slice(trim, vals.length - trim);
+        return kept.reduce((s, v) => s + v, 0) / Math.max(1, kept.length);
+      };
+      WAND_BASE_REACH = meanWith(samples, 'baseLocal', 'along');
+      WAND_BASE_PERP  = meanWith(samples, 'baseLocal', 'perp');
+      WAND_TIP_REACH  = meanWith(samples.filter(s => s.tipLocal), 'tipLocal', 'along');
+      WAND_TIP_PERP   = meanWith(samples.filter(s => s.tipLocal), 'tipLocal', 'perp');
+    } else if (finalBase && finalTip) {
+      WAND_BASE_REACH = finalBase.along;
+      WAND_BASE_PERP  = finalBase.perp;
+      WAND_TIP_REACH  = finalTip.along;
+      WAND_TIP_PERP   = finalTip.perp;
     }
   }
   saveCal();
   updateReachUI();
   state.calibrating = false;
   state.calibrateDrag = null;
+  state.calibrateSamples = null;
   const el = document.getElementById('calOverlay');
   if (el) el.classList.remove('active');
+  const sampleCount = (d && state._lastSampleCount) || 0;
   setStatus('Calibrated. Speak. Then flick.');
   return false;
 }
@@ -1057,16 +1114,20 @@ function updateWand() {
   const lmRaw = state.latestResults.multiHandLandmarks[0];
   const rawPts = lmRaw.map(p => ({ x: (1 - p.x) * width, y: p.y * height }));
 
-  // Temporal smoothing: exponential moving average per landmark to kill jitter
-  // while staying responsive. Higher alpha = snappier (more jitter).
-  const ALPHA = 0.55;
-  if (!state.smoothedLm || state.smoothedLm.length !== rawPts.length) {
+  // One Euro filter — adaptive low-pass with cutoff that scales with the
+  // signal's derivative. Heavy smoothing when still (kills jitter), light
+  // smoothing when moving fast (no lag during flicks).
+  const now = millis();
+  if (!state.lmFilters || state.lmFilters.length !== rawPts.length) {
+    state.lmFilters = rawPts.map(() => ({
+      x: { val: null, dx: 0, lastT: null },
+      y: { val: null, dx: 0, lastT: null }
+    }));
     state.smoothedLm = rawPts.map(p => ({ ...p }));
-  } else {
-    for (let i = 0; i < rawPts.length; i++) {
-      state.smoothedLm[i].x = state.smoothedLm[i].x * (1 - ALPHA) + rawPts[i].x * ALPHA;
-      state.smoothedLm[i].y = state.smoothedLm[i].y * (1 - ALPHA) + rawPts[i].y * ALPHA;
-    }
+  }
+  for (let i = 0; i < rawPts.length; i++) {
+    state.smoothedLm[i].x = oneEuro(state.lmFilters[i].x, rawPts[i].x, now);
+    state.smoothedLm[i].y = oneEuro(state.lmFilters[i].y, rawPts[i].y, now);
   }
   const pts = state.smoothedLm;
 
@@ -2773,6 +2834,50 @@ function drawWand(ctx) {
       if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
     }
     ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // Debug landmarks overlay (D)
+  if (state.debugLandmarks && state.handPts) {
+    ctx.save();
+    const HAND_CONNECTIONS = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [5,9],[9,10],[10,11],[11,12],
+      [9,13],[13,14],[14,15],[15,16],
+      [13,17],[17,18],[18,19],[19,20],
+      [0,17]
+    ];
+    ctx.shadowBlur = 6; ctx.shadowColor = '#0ff';
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.7)';
+    ctx.lineWidth = 1.5;
+    for (const [a, b] of HAND_CONNECTIONS) {
+      ctx.beginPath();
+      ctx.moveTo(state.handPts[a].x, state.handPts[a].y);
+      ctx.lineTo(state.handPts[b].x, state.handPts[b].y);
+      ctx.stroke();
+    }
+    // landmarks: tips magenta, others cyan, wrist yellow
+    const TIPS = new Set([4, 8, 12, 16, 20]);
+    for (let i = 0; i < state.handPts.length; i++) {
+      const p = state.handPts[i];
+      const c = i === 0 ? '#ffd700' : (TIPS.has(i) ? '#ff31d2' : '#00ffff');
+      ctx.shadowBlur = 8; ctx.shadowColor = c;
+      ctx.fillStyle = c;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI*2); ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#000';
+      ctx.font = 'bold 9px monospace';
+      ctx.fillText(String(i), p.x + 6, p.y - 6);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(String(i), p.x + 5, p.y - 7);
+    }
+    // Knuckle center marker (the wand axis anchor)
+    if (state._knuckle) {
+      ctx.shadowBlur = 12; ctx.shadowColor = '#ffd700';
+      ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(state._knuckle.x, state._knuckle.y, 8, 0, Math.PI*2); ctx.stroke();
+    }
     ctx.restore();
   }
 }

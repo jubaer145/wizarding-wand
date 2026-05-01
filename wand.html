@@ -94,7 +94,10 @@
 <body>
 <div id="status">Awakening the wand…</div>
 <div id="reach" style="position:fixed; top:38px; left:12px; z-index:10; padding:4px 10px; background:rgba(0,0,0,0.55); border:1px solid rgba(232,216,160,0.3); border-radius:4px; font-size:10px; letter-spacing:1px; color:#c8b878; font-family:monospace; pointer-events:none;">Wand reach: 1.2× ([ / ])</div>
-<div id="ambient" style="position:fixed; top:64px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(150,200,255,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#aabbff; font-family:monospace; cursor:pointer;" title="Click to load an audio file. Drop one anywhere on the page. Press A to toggle.">
+<div id="hedwigToggle" style="position:fixed; top:64px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(255,215,128,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#ffd780; font-family:monospace; cursor:pointer;" title="Click or press M to toggle Hedwig's Theme">
+  ♪ Hedwig's Theme: on (M)
+</div>
+<div id="ambient" style="position:fixed; top:90px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(150,200,255,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#aabbff; font-family:monospace; cursor:pointer;" title="Click to load an audio file. Drop one anywhere on the page. Press A to toggle.">
   Drop ambient sound here  ·  click to choose
 </div>
 <input type="file" id="ambientFile" accept="audio/*" style="display:none;">
@@ -278,8 +281,11 @@ state.calibrateDrag = null; // {ax, ay, bx, by} during drag
 state.calibrateSamples = null; // [{baseLocal, tipLocal}, ...] during drag for averaging
 state.smoothedLm = null;    // smoothed landmarks for stable rendering
 state.lmFilters = null;     // One Euro filter state per landmark per axis
-state.musicEnabled = true;
 state.musicStarted = false;
+// Music preference persists across sessions
+try {
+  state.musicEnabled = localStorage.getItem('musicEnabled') !== 'false';
+} catch(e) { state.musicEnabled = true; }
 state.debugLandmarks = false;
 
 // One Euro filter (Casiez/Roussel/Vogel 2012) — adaptive low-pass
@@ -991,6 +997,7 @@ function scheduleHedwigLoop(startTime) {
 }
 function toggleMusic() {
   state.musicEnabled = !state.musicEnabled;
+  try { localStorage.setItem('musicEnabled', state.musicEnabled ? 'true' : 'false'); } catch(e) {}
   if (state.musicMaster) {
     const ctx = getAudioCtx();
     state.musicMaster.gain.cancelScheduledValues(ctx.currentTime);
@@ -998,7 +1005,16 @@ function toggleMusic() {
       state.musicEnabled ? 0.05 : 0, ctx.currentTime + 0.4
     );
   }
+  updateHedwigLabel();
   setStatus(state.musicEnabled ? 'Music on' : 'Music muted');
+}
+function updateHedwigLabel() {
+  const el = document.getElementById('hedwigToggle');
+  if (!el) return;
+  const on = state.musicEnabled;
+  el.textContent = on ? "♪ Hedwig's Theme: on (M)" : "♪̸ Hedwig's Theme: muted (M)";
+  el.style.color = on ? '#ffd780' : '#665533';
+  el.style.borderColor = on ? 'rgba(255,215,128,0.3)' : 'rgba(120,100,60,0.3)';
 }
 
 // =========================================================================
@@ -1070,6 +1086,9 @@ function wireAmbientUI() {
   const el = document.getElementById('ambient');
   const input = document.getElementById('ambientFile');
   const drop = document.getElementById('dropOverlay');
+  const hedwig = document.getElementById('hedwigToggle');
+  if (hedwig) hedwig.addEventListener('click', toggleMusic);
+  updateHedwigLabel();
   if (el) el.addEventListener('click', () => input && input.click());
   if (input) input.addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];

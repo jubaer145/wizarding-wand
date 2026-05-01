@@ -1225,14 +1225,28 @@ function fireSpell(name, def) {
     case 'beam':
     case 'fire':
     case 'water':
-    case 'ice':
+    case 'ice': {
+      // Extend range to the screen edge so beams travel full distance
+      // when there's nothing to hit.
+      const maxDist = rayDistanceToScreenEdge(tip, dir);
+      const speed = def.type === 'beam' ? 26 : 14;
+      const travelMs = (maxDist / speed) * (1000 / 60);
       state.effects.push({
         kind: 'beam', spell: name, color: def.color, type: def.type,
         origin: tip, dir, damage: def.damage,
-        bornAt: t, life: def.type === 'beam' ? 600 : 1200,
-        progress: 0, hit: false, particles: []
+        bornAt: t,
+        life: travelMs + 600,         // travel + fade at far end
+        speed,
+        progress: 0,
+        maxDist,
+        terminated: false,            // becomes true on hit OR reaching edge
+        terminatedReason: null,       // 'hit' | 'edge'
+        endX: tip.x, endY: tip.y,
+        hit: false,
+        particles: []
       });
       break;
+    }
     case 'slash':
       state.effects.push({
         kind: 'slash', spell: name, color: def.color,
@@ -1542,28 +1556,46 @@ function updateEffects() {
     if (age > e.life) { state.effects.splice(i, 1); continue; }
 
     if (e.kind === 'beam') {
-      const speed = e.type === 'beam' ? 24 : 14;
-      e.progress += speed;
-      const tipX = e.origin.x + e.dir.x * e.progress;
-      const tipY = e.origin.y + e.dir.y * e.progress;
-      // particle trail
-      e.particles.push({ x: tipX, y: tipY, life: 1 });
-      if (e.particles.length > 60) e.particles.shift();
-      for (const p of e.particles) p.life -= 0.04;
-
-      // hit detection
-      if (!e.hit) {
+      const speed = e.speed || (e.type === 'beam' ? 26 : 14);
+      if (!e.terminated) {
+        e.progress += speed;
+        // Hit any dummy along the path?
+        let struck = null;
+        const tipX = e.origin.x + e.dir.x * e.progress;
+        const tipY = e.origin.y + e.dir.y * e.progress;
         for (const d of state.dummies) {
           if (!d.alive) continue;
           const dx = tipX - d.x, dy = tipY - d.y;
-          if (dx*dx + dy*dy < 60*60) {
-            applySpellHit(e, d);
-            e.hit = true;
-            e.life = age + 300; // tail off after hit
-            break;
-          }
+          if (dx*dx + dy*dy < 60*60) { struck = d; break; }
+        }
+        if (struck) {
+          // Lock end at dummy, kill the dementor, vanish quickly.
+          e.endX = struck.x; e.endY = struck.y;
+          e.terminated = true;
+          e.terminatedReason = 'hit';
+          e.terminatedAt = age;
+          // Avada Kedavra has a longer death scene; other beams clear faster
+          const fade = e.spell === 'avada kedavra' ? 250 : 220;
+          e.life = age + fade;
+          applySpellHit(e, struck);
+          e.hit = true;
+        } else if (e.progress >= e.maxDist) {
+          // Reached the screen edge without hitting anything — fade.
+          e.endX = e.origin.x + e.dir.x * e.maxDist;
+          e.endY = e.origin.y + e.dir.y * e.maxDist;
+          e.terminated = true;
+          e.terminatedReason = 'edge';
+          e.terminatedAt = age;
+          e.life = age + 350;
+        } else {
+          // Still traveling
+          e.endX = tipX; e.endY = tipY;
         }
       }
+      // Particle trail at the leading edge (continues briefly after termination)
+      e.particles.push({ x: e.endX, y: e.endY, life: 1 });
+      if (e.particles.length > 70) e.particles.shift();
+      for (const p of e.particles) p.life -= 0.04;
     } else if (e.kind === 'slash') {
       // slash near origin only
       if (age < 100) {
@@ -2089,6 +2121,18 @@ function drawDummies(ctx) {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+// Distance from `origin` along unit `dir` to the nearest canvas edge.
+// Returns a positive distance — used so beams travel the full visible
+// extent when they don't hit a target.
+function rayDistanceToScreenEdge(origin, dir) {
+  let tMin = Infinity;
+  if (dir.x > 1e-6)  tMin = Math.min(tMin, (width  - origin.x) / dir.x);
+  else if (dir.x < -1e-6) tMin = Math.min(tMin, (-origin.x) / dir.x);
+  if (dir.y > 1e-6)  tMin = Math.min(tMin, (height - origin.y) / dir.y);
+  else if (dir.y < -1e-6) tMin = Math.min(tMin, (-origin.y) / dir.y);
+  return Math.max(50, isFinite(tMin) ? tMin : 800);
+}
+
 // Patronus parametric path: short launch → 1.5 orbital revolutions →
 // inward spiral as it dissolves. Stays inside the central viewport area.
 function patronusPathPos(e, t) {
@@ -2516,14 +2560,21 @@ function drawEffects(ctx) {
     const lifeFrac = Math.max(0, 1 - age / e.life);
     ctx.save();
     if (e.kind === 'beam') {
-      const tipX = e.origin.x + e.dir.x * e.progress;
-      const tipY = e.origin.y + e.dir.y * e.progress;
+      const tipX = e.endX, tipY = e.endY;
+      // After termination, fade the whole beam quickly
+      let beamAlpha = 1;
+      if (e.terminated) {
+        const fadeAge = age - e.terminatedAt;
+        const fadeLen = e.life - e.terminatedAt;
+        beamAlpha = Math.max(0, 1 - fadeAge / fadeLen);
+      }
+
       // particle trail
       for (const p of e.particles) {
         if (p.life <= 0) continue;
         ctx.shadowBlur = 18; ctx.shadowColor = e.color;
         ctx.fillStyle = e.color;
-        ctx.globalAlpha = p.life;
+        ctx.globalAlpha = p.life * beamAlpha;
         ctx.beginPath(); ctx.arc(p.x, p.y, 4 * p.life + 1, 0, Math.PI*2); ctx.fill();
       }
       ctx.globalAlpha = 1;
@@ -2531,10 +2582,10 @@ function drawEffects(ctx) {
       ctx.shadowBlur = 36; ctx.shadowColor = e.color;
       ctx.strokeStyle = e.color;
       ctx.lineWidth = 14;
-      ctx.globalAlpha = 0.45;
+      ctx.globalAlpha = 0.45 * beamAlpha;
       ctx.beginPath(); ctx.moveTo(e.origin.x, e.origin.y); ctx.lineTo(tipX, tipY); ctx.stroke();
       // mid colored core
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = 1 * beamAlpha;
       ctx.shadowBlur = 24;
       ctx.lineWidth = 6;
       ctx.beginPath(); ctx.moveTo(e.origin.x, e.origin.y); ctx.lineTo(tipX, tipY); ctx.stroke();
@@ -2550,7 +2601,7 @@ function drawEffects(ctx) {
       for (let pass = 0; pass < 2; pass++) {
         ctx.shadowBlur = 16; ctx.shadowColor = e.color;
         ctx.strokeStyle = e.color; ctx.lineWidth = 2;
-        ctx.globalAlpha = 0.85;
+        ctx.globalAlpha = 0.85 * beamAlpha;
         ctx.beginPath();
         for (let i = 0; i <= segs; i++) {
           const f = i / segs;
@@ -2566,15 +2617,17 @@ function drawEffects(ctx) {
       }
       ctx.globalAlpha = 1;
 
-      // head halo at the leading edge
-      ctx.shadowBlur = 40; ctx.shadowColor = e.color;
-      ctx.fillStyle = e.color;
-      const haloR = e.spell === 'avada kedavra'
-        ? 16 + Math.sin(t*0.04)*4
-        : 9 + Math.sin(t*0.05)*2;
-      ctx.beginPath(); ctx.arc(tipX, tipY, haloR, 0, Math.PI*2); ctx.fill();
-      ctx.shadowBlur = 12; ctx.fillStyle = '#ffffff';
-      ctx.beginPath(); ctx.arc(tipX, tipY, haloR * 0.4, 0, Math.PI*2); ctx.fill();
+      // head halo — only while still traveling (vanishes on hit/edge)
+      if (!e.terminated) {
+        ctx.shadowBlur = 40; ctx.shadowColor = e.color;
+        ctx.fillStyle = e.color;
+        const haloR = e.spell === 'avada kedavra'
+          ? 16 + Math.sin(t*0.04)*4
+          : 9 + Math.sin(t*0.05)*2;
+        ctx.beginPath(); ctx.arc(tipX, tipY, haloR, 0, Math.PI*2); ctx.fill();
+        ctx.shadowBlur = 12; ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.arc(tipX, tipY, haloR * 0.4, 0, Math.PI*2); ctx.fill();
+      }
     } else if (e.kind === 'slash') {
       ctx.shadowBlur = 30; ctx.shadowColor = e.color;
       ctx.strokeStyle = e.color; ctx.lineWidth = 5;

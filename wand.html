@@ -291,8 +291,8 @@ state.debugLandmarks = false;
 // One Euro filter (Casiez/Roussel/Vogel 2012) — adaptive low-pass
 // minCutoff: cutoff at zero velocity (lower = smoother when still)
 // beta: how fast cutoff rises with velocity (higher = more responsive when moving)
-const ONE_EURO_MIN_CUTOFF = 1.4;
-const ONE_EURO_BETA       = 0.06;
+const ONE_EURO_MIN_CUTOFF = 0.8;
+const ONE_EURO_BETA       = 0.07;
 const ONE_EURO_DCUTOFF    = 1.0;
 function oneEuroAlpha(cutoff, dt) {
   const tau = 1.0 / (2 * Math.PI * cutoff);
@@ -1121,10 +1121,22 @@ function wireAmbientUI() {
 // WAND TRACKING
 // =========================================================================
 function updateWand() {
-  if (!state.latestResults || !state.latestResults.multiHandLandmarks ||
-      state.latestResults.multiHandLandmarks.length === 0) {
-    state.wandTip = null; state.wandBase = null; return;
+  const haveDetection = state.latestResults
+    && state.latestResults.multiHandLandmarks
+    && state.latestResults.multiHandLandmarks.length > 0;
+
+  if (!haveDetection) {
+    // Detection drop: persist the last known wand position for ~400ms so
+    // brief MediaPipe stalls don't visibly flicker the wand off and on.
+    const since = millis() - (state.lastDetectionAt || 0);
+    if (since > 400) {
+      state.wandTip = null;
+      state.wandBase = null;
+    }
+    // Otherwise leave wandTip/wandBase as they were last frame
+    return;
   }
+  state.lastDetectionAt = millis();
   // Hand is back in frame — clear the calibration prompt if it stuck
   if (state._statusWasHandPrompt) {
     setStatus('Speak. Then flick.');
@@ -1179,11 +1191,29 @@ function updateWand() {
   state._fwd = { x: dirX, y: dirY };
   state._perp = { x: perpX, y: perpY };
 
-  state.wandBase = base;
-  state.wandTip = tip;
-  // Spells follow the actual base→tip vector so any perpendicular calibration
-  // correctly aims spells where the wand visually points.
-  state.wandDir = state._spellDir;
+  // Second smoothing pass on the derived wandBase/wandTip points themselves.
+  // Catches jitter introduced by hand-pose-dependent calibration math, on
+  // top of the already-smoothed landmark stream. Heavier smoothing here
+  // (lower minCutoff) since we're working with semantic positions, not raw
+  // tracker noise.
+  if (!state.wandFilters) {
+    state.wandFilters = {
+      bx: { val: null, dx: 0, lastT: null }, by: { val: null, dx: 0, lastT: null },
+      tx: { val: null, dx: 0, lastT: null }, ty: { val: null, dx: 0, lastT: null }
+    };
+  }
+  const wt = millis();
+  const bxS = oneEuro(state.wandFilters.bx, base.x, wt, 0.6, 0.05);
+  const byS = oneEuro(state.wandFilters.by, base.y, wt, 0.6, 0.05);
+  const txS = oneEuro(state.wandFilters.tx, tip.x,  wt, 0.6, 0.05);
+  const tyS = oneEuro(state.wandFilters.ty, tip.y,  wt, 0.6, 0.05);
+  state.wandBase = { x: bxS, y: byS };
+  state.wandTip  = { x: txS, y: tyS };
+  // Recompute spell direction from the SMOOTHED endpoints so spells aim
+  // through the visible wand line, not through the raw landmark frame.
+  const sdx = txS - bxS, sdy = tyS - byS;
+  const slen = Math.hypot(sdx, sdy) + 1e-3;
+  state.wandDir = { x: sdx / slen, y: sdy / slen };
   state.handPts = pts;
 
   // History + speed

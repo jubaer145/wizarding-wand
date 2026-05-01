@@ -806,37 +806,114 @@ const HEDWIG_NOTES = [
   // brief silence
   [-1, 1.6],
 ];
+// Build a procedural impulse response for a small hall reverb. Generated once.
+function makeReverbIR(ctx, seconds = 2.6, decay = 2.2) {
+  const sr = ctx.sampleRate;
+  const len = Math.floor(sr * seconds);
+  const buf = ctx.createBuffer(2, len, sr);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = buf.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      const t = i / sr;
+      // Two-stage: brief early reflections + diffuse exponential decay
+      const env = Math.exp(-t * decay);
+      const er = (i < sr * 0.04) ? Math.random() * 0.5 : 0;
+      data[i] = ((Math.random() * 2 - 1) * env + er * env);
+    }
+  }
+  return buf;
+}
+
 function playHedwigNote(t0, midi, dur, vol) {
   const ctx = getAudioCtx();
   if (midi < 0) return;
   const freq = midiToFreq(midi);
-  // Bell/celesta: stacked sines with a very fast attack and long-ish decay
+
+  // Inharmonicity: real bells/celestas have partials slightly stretched
+  // from pure integer ratios. Use the standard piano formula:
+  //   f_n = n * f0 * sqrt(1 + B * n^2)   with small B
+  const B = 0.0008;
   const partials = [
-    { mult: 1,    amp: 1.0  },
-    { mult: 2,    amp: 0.35 },
-    { mult: 3,    amp: 0.18 },
-    { mult: 4.01, amp: 0.08 },
+    { n: 1, amp: 1.00 },
+    { n: 2, amp: 0.42 },
+    { n: 3, amp: 0.20 },
+    { n: 4, amp: 0.10 },
+    { n: 5, amp: 0.05 },
   ];
   const sumAmp = partials.reduce((s,p)=>s+p.amp, 0);
   for (const p of partials) {
+    const inharmFactor = Math.sqrt(1 + B * p.n * p.n);
+    // Slight per-partial detune for natural beating
+    const detune = 1 + (Math.random() - 0.5) * 0.0008;
     const osc = ctx.createOscillator();
     osc.type = 'sine';
-    osc.frequency.value = freq * p.mult;
+    osc.frequency.value = freq * p.n * inharmFactor * detune;
     const gain = ctx.createGain();
     const peak = vol * (p.amp / sumAmp);
     gain.gain.setValueAtTime(0, t0);
-    gain.gain.linearRampToValueAtTime(peak, t0 + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    osc.connect(gain); gain.connect(state.musicMaster);
-    osc.start(t0); osc.stop(t0 + dur + 0.05);
+    gain.gain.linearRampToValueAtTime(peak, t0 + 0.006);
+    // Natural physical decay: setTargetAtTime gives true exponential
+    // resonance falloff. Higher partials decay faster (real instruments do).
+    const decayTime = dur * (0.6 / Math.pow(p.n, 0.7));
+    gain.gain.setTargetAtTime(0.0001, t0 + 0.02, decayTime);
+    osc.connect(gain);
+    gain.connect(state.musicBus);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.5);
   }
+
+  // Attack transient: tiny filtered noise burst — the "pluck/strike" sound
+  // when a hammer hits a real metal bar. Subliminal but big realism win.
+  const noiseLen = Math.max(1, Math.floor(ctx.sampleRate * 0.05));
+  const noiseBuf = ctx.createBuffer(1, noiseLen, ctx.sampleRate);
+  const nd = noiseBuf.getChannelData(0);
+  for (let i = 0; i < noiseLen; i++) nd[i] = Math.random() * 2 - 1;
+  const noise = ctx.createBufferSource();
+  noise.buffer = noiseBuf;
+  const noiseFilt = ctx.createBiquadFilter();
+  noiseFilt.type = 'bandpass';
+  noiseFilt.frequency.value = freq * 5;
+  noiseFilt.Q.value = 1.5;
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.setValueAtTime(vol * 0.06, t0);
+  noiseGain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.05);
+  noise.connect(noiseFilt); noiseFilt.connect(noiseGain);
+  noiseGain.connect(state.musicBus);
+  noise.start(t0);
 }
 function startHedwigsTheme() {
   if (state.musicStarted) return;
   const ctx = getAudioCtx();
+
+  // Music master bus → reverb send + dry to destination
   state.musicMaster = ctx.createGain();
   state.musicMaster.gain.value = state.musicEnabled ? 0.05 : 0;
   state.musicMaster.connect(ctx.destination);
+
+  // Pre-master bus where notes are mixed before going through dry+wet paths
+  state.musicBus = ctx.createGain();
+  state.musicBus.gain.value = 1;
+  state.musicBus.connect(state.musicMaster); // dry path
+
+  // Reverb (convolution): notes also feed a wet path through ConvolverNode
+  state.musicReverb = ctx.createConvolver();
+  state.musicReverb.buffer = makeReverbIR(ctx, 2.6, 2.2);
+  const wetGain = ctx.createGain();
+  wetGain.gain.value = 0.55; // wet/dry mix — generous so the hall reads
+  state.musicBus.connect(state.musicReverb);
+  state.musicReverb.connect(wetGain);
+  wetGain.connect(state.musicMaster);
+
+  // Slight high-shelf damping on the wet path so reverb tail isn't harsh
+  const damp = ctx.createBiquadFilter();
+  damp.type = 'lowpass';
+  damp.frequency.value = 4500;
+  damp.Q.value = 0.7;
+  // Re-route wet through damp
+  state.musicReverb.disconnect();
+  state.musicReverb.connect(damp);
+  damp.connect(wetGain);
+
   state.musicStarted = true;
   scheduleHedwigLoop(ctx.currentTime + 0.5);
 }

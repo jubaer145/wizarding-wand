@@ -1245,21 +1245,32 @@ function fireSpell(name, def) {
     case 'fire':
     case 'water':
     case 'ice': {
-      // Extend range to the screen edge so beams travel full distance
-      // when there's nothing to hit.
       const maxDist = rayDistanceToScreenEdge(tip, dir);
-      const speed = def.type === 'beam' ? 26 : 14;
-      const travelMs = (maxDist / speed) * (1000 / 60);
+      // Per-spell travel speed (px per 60fps frame). Termination is purely
+      // progress-based, so the beam always reaches its target regardless
+      // of actual frame rate.
+      const SPEED_BY_NAME = {
+        'avada kedavra': 60,   // green flash — near-instant
+        'reducto':       42,
+        'stupefy':       38,
+        'crucio':        34,
+        'incendio':      20,
+        'aguamenti':     18,
+        'glacius':       26,
+      };
+      const speed = SPEED_BY_NAME[name] || (def.type === 'beam' ? 36 : 18);
       state.effects.push({
         kind: 'beam', spell: name, color: def.color, type: def.type,
         origin: tip, dir, damage: def.damage,
         bornAt: t,
-        life: travelMs + 600,         // travel + fade at far end
+        // Generous life — termination logic clamps it down on hit/edge.
+        // This makes travel frame-rate independent.
+        life: 10000,
         speed,
         progress: 0,
         maxDist,
-        terminated: false,            // becomes true on hit OR reaching edge
-        terminatedReason: null,       // 'hit' | 'edge'
+        terminated: false,
+        terminatedReason: null,
         endX: tip.x, endY: tip.y,
         hit: false,
         particles: []

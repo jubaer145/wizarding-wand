@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pinch Painter — Neon Hands</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #05060f; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #0ff; }
+  #status {
+    position: fixed; top: 12px; left: 12px; z-index: 10;
+    padding: 6px 10px; background: rgba(0,0,0,0.55);
+    border: 1px solid #0ff5; border-radius: 6px;
+    font-size: 12px; letter-spacing: 1px; text-transform: uppercase;
+    color: #0ff; text-shadow: 0 0 6px #0ff; pointer-events: none;
+  }
+  #hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 10; padding: 8px 14px; background: rgba(0,0,0,0.6);
+    border: 1px solid #0ff5; border-radius: 6px;
+    font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: #0ff; text-shadow: 0 0 8px #0ff; pointer-events: none;
+    white-space: nowrap;
+  }
+  #toolbar {
+    position: fixed; top: 12px; right: 12px; z-index: 10;
+    display: flex; gap: 6px; padding: 8px;
+    background: rgba(0,0,0,0.55); border: 1px solid #fff3;
+    border-radius: 8px;
+  }
+  .swatch {
+    width: 26px; height: 26px; border-radius: 50%;
+    cursor: pointer; border: 2px solid transparent;
+    box-shadow: 0 0 12px currentColor;
+  }
+  .swatch.active { border-color: #fff; transform: scale(1.15); }
+  .btn {
+    padding: 6px 10px; font-size: 11px; letter-spacing: 1.5px;
+    text-transform: uppercase; background: rgba(0,0,0,0.6);
+    color: #0ff; border: 1px solid #0ff5; border-radius: 4px;
+    cursor: pointer; font-family: inherit;
+  }
+  .btn:hover { background: #0ff2; }
+  canvas { display: block; }
+  video { display: none !important; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="status">Initializing camera…</div>
+<div id="hint">Pinch thumb + index to draw  •  C: clear  •  U: undo  •  1-6: color</div>
+<div id="toolbar">
+  <button class="btn" id="undoBtn">Undo</button>
+  <button class="btn" id="clearBtn">Clear</button>
+</div>
+
+<script>
+  // ---------- Config ----------
+  const PALETTE = [
+    '#00ffff', // cyan
+    '#ff31d2', // magenta
+    '#fff200', // yellow
+    '#39ff14', // neon green
+    '#ff6a00', // orange
+    '#b066ff'  // violet
+  ];
+  // Per-hand active color (left/right user hands)
+  const handColors = { left: PALETTE[1], right: PALETTE[0] };
+  let activeColor = PALETTE[0];
+
+  // Strokes: each stroke = { color, points: [{x,y,t}], hand }
+  const strokes = [];
+  // Active in-progress stroke per hand
+  const activeStroke = { left: null, right: null };
+  // Pinch state edge detection
+  const wasPinching = { left: false, right: false };
+
+  // Pinch detection threshold (relative to hand size)
+  const PINCH_THRESHOLD = 0.5;
+
+  // ---------- Globals ----------
+  let videoEl;
+  let latestResults = null;
+  let camReady = false;
+
+  // ---------- p5 ----------
+  function setup() {
+    pixelDensity(1);
+    createCanvas(windowWidth, windowHeight);
+    frameRate(60);
+    setStatus('Requesting camera permission…');
+    initMediaPipe();
+    buildToolbar();
+    document.getElementById('clearBtn').addEventListener('click', () => strokes.length = 0);
+    document.getElementById('undoBtn').addEventListener('click', () => strokes.pop());
+  }
+  function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+  function setStatus(m) { const e = document.getElementById('status'); if (e) e.textContent = m; }
+
+  function buildToolbar() {
+    const tb = document.getElementById('toolbar');
+    PALETTE.forEach((color, idx) => {
+      const sw = document.createElement('div');
+      sw.className = 'swatch' + (color === activeColor ? ' active' : '');
+      sw.style.background = color;
+      sw.style.color = color;
+      sw.title = `Color ${idx+1}`;
+      sw.addEventListener('click', () => setActiveColor(color));
+      tb.insertBefore(sw, tb.firstChild);
+    });
+  }
+  function setActiveColor(c) {
+    activeColor = c;
+    handColors.left = c;
+    handColors.right = c;
+    document.querySelectorAll('.swatch').forEach(el => {
+      el.classList.toggle('active', el.style.background.includes(c.replace('#','')) || rgbMatches(el.style.background, c));
+    });
+  }
+  function rgbMatches(rgbStr, hex) {
+    if (!rgbStr) return false;
+    const m = rgbStr.match(/\d+/g);
+    if (!m) return false;
+    const r = parseInt(m[0]), g = parseInt(m[1]), b = parseInt(m[2]);
+    const h = hex.replace('#','');
+    return r === parseInt(h.substring(0,2),16) && g === parseInt(h.substring(2,4),16) && b === parseInt(h.substring(4,6),16);
+  }
+
+  function keyPressed() {
+    if (key === 'c' || key === 'C') strokes.length = 0;
+    else if (key === 'u' || key === 'U') strokes.pop();
+    else if (key >= '1' && key <= '6') {
+      const idx = parseInt(key) - 1;
+      if (PALETTE[idx]) setActiveColor(PALETTE[idx]);
+    }
+  }
+
+  // ---------- MediaPipe ----------
+  function initMediaPipe() {
+    videoEl = document.createElement('video');
+    videoEl.setAttribute('playsinline', '');
+    videoEl.muted = true;
+    document.body.appendChild(videoEl);
+
+    const hands = new Hands({
+      locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+    });
+    hands.setOptions({
+      maxNumHands: 2, modelComplexity: 1,
+      minDetectionConfidence: 0.6, minTrackingConfidence: 0.5
+    });
+    hands.onResults((r) => {
+      latestResults = r;
+      if (!camReady) { camReady = true; setStatus('Pinch to draw'); }
+    });
+    const cam = new Camera(videoEl, {
+      onFrame: async () => { await hands.send({ image: videoEl }); },
+      width: 1280, height: 720
+    });
+    cam.start().catch(e => setStatus('Camera error: ' + e.message));
+  }
+
+  // ---------- Helpers ----------
+  function projectHands(results) {
+    if (!results.multiHandLandmarks) return [];
+    const handed = results.multiHandedness || [];
+    return results.multiHandLandmarks.map((lm, i) => ({
+      label: handed[i] ? handed[i].label : (i === 0 ? 'Right' : 'Left'),
+      points: lm.map(p => ({ x: (1 - p.x) * width, y: p.y * height, z: p.z }))
+    }));
+  }
+  function classifyHands(projected) {
+    let leftHand = null, rightHand = null;
+    for (const h of projected) {
+      if (h.label === 'Left') rightHand = h; // mirrored swap
+      else if (h.label === 'Right') leftHand = h;
+    }
+    if (!leftHand && !rightHand && projected.length >= 2) {
+      const sorted = [...projected].sort((a,b) => a.points[0].x - b.points[0].x);
+      leftHand = sorted[0]; rightHand = sorted[1];
+    }
+    return { leftHand, rightHand };
+  }
+  function pinchAmount(pts) {
+    const a = pts[4], b = pts[8];
+    const palm = pts[0], mid = pts[9];
+    const handSize = Math.hypot(palm.x - mid.x, palm.y - mid.y) + 1e-3;
+    return Math.hypot(a.x - b.x, a.y - b.y) / handSize;
+  }
+  function pinchPoint(pts) {
+    return { x: (pts[4].x + pts[8].x)/2, y: (pts[4].y + pts[8].y)/2 };
+  }
+
+  // ---------- Draw ----------
+  function draw() {
+    const ctx = drawingContext;
+
+    // Deep midnight bg
+    const g = ctx.createLinearGradient(0, 0, 0, height);
+    g.addColorStop(0, '#070318');
+    g.addColorStop(1, '#01010a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, width, height);
+
+    // Subtle grid
+    ctx.save();
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.04)';
+    ctx.lineWidth = 1;
+    const step = 40;
+    for (let x = 0; x < width; x += step) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+    }
+    for (let y = 0; y < height; y += step) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+    }
+    ctx.restore();
+
+    // Render all completed + active strokes
+    drawStrokes(ctx);
+
+    // Process hand input
+    if (latestResults) {
+      const projected = projectHands(latestResults);
+      const { leftHand, rightHand } = classifyHands(projected);
+      handleHand(leftHand,  'left');
+      handleHand(rightHand, 'right');
+
+      // Hand silhouettes on top
+      for (const h of projected) drawHand(ctx, h.points);
+
+      // Pinch indicators
+      if (leftHand)  drawPinchIndicator(ctx, leftHand.points,  wasPinching.left);
+      if (rightHand) drawPinchIndicator(ctx, rightHand.points, wasPinching.right);
+    }
+  }
+
+  function handleHand(hand, side) {
+    if (!hand) {
+      if (activeStroke[side]) {
+        // Hand lost mid-stroke — finalize
+        if (activeStroke[side].points.length > 1) strokes.push(activeStroke[side]);
+        activeStroke[side] = null;
+      }
+      wasPinching[side] = false;
+      return;
+    }
+    const amt = pinchAmount(hand.points);
+    const isPinching = amt < PINCH_THRESHOLD;
+    const p = pinchPoint(hand.points);
+
+    if (isPinching) {
+      if (!wasPinching[side]) {
+        // Start new stroke
+        activeStroke[side] = {
+          color: handColors[side],
+          hand: side,
+          points: [{ x: p.x, y: p.y, t: millis() }]
+        };
+      } else if (activeStroke[side]) {
+        const pts = activeStroke[side].points;
+        const last = pts[pts.length-1];
+        const dx = p.x - last.x, dy = p.y - last.y;
+        if (dx*dx + dy*dy > 4) pts.push({ x: p.x, y: p.y, t: millis() });
+      }
+    } else {
+      if (wasPinching[side] && activeStroke[side]) {
+        if (activeStroke[side].points.length > 1) strokes.push(activeStroke[side]);
+        activeStroke[side] = null;
+      }
+    }
+    wasPinching[side] = isPinching;
+  }
+
+  function drawStrokes(ctx) {
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const all = strokes.concat([activeStroke.left, activeStroke.right].filter(Boolean));
+    for (const s of all) {
+      if (s.points.length < 2) continue;
+      // Outer glow pass
+      ctx.shadowBlur = 22;
+      ctx.shadowColor = s.color;
+      ctx.strokeStyle = s.color;
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.moveTo(s.points[0].x, s.points[0].y);
+      for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+      ctx.stroke();
+      // Sharp inner pass
+      ctx.shadowBlur = 6;
+      ctx.strokeStyle = '#ffffff';
+      ctx.globalAlpha = 0.95;
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(s.points[0].x, s.points[0].y);
+      for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawHand(ctx, pts) {
+    const CONN = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [5,9],[9,10],[10,11],[11,12],
+      [9,13],[13,14],[14,15],[15,16],
+      [13,17],[17,18],[18,19],[19,20],
+      [0,17]
+    ];
+    ctx.save();
+    ctx.shadowBlur = 12; ctx.shadowColor = '#00ffff';
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.45)';
+    ctx.lineWidth = 1.4; ctx.lineCap = 'round';
+    for (const [a,b] of CONN) {
+      ctx.beginPath();
+      ctx.moveTo(pts[a].x, pts[a].y);
+      ctx.lineTo(pts[b].x, pts[b].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+    const TIPS = [4,8,12,16,20];
+    for (let i = 0; i < pts.length; i++) {
+      const isTip = TIPS.includes(i);
+      const color = isTip ? '#ff31d2' : '#00ffff';
+      const r = isTip ? 6 : 3.5;
+      ctx.save();
+      ctx.shadowBlur = isTip ? 18 : 10;
+      ctx.shadowColor = color; ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(pts[i].x, pts[i].y, r, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawPinchIndicator(ctx, pts, isPinching) {
+    const p = pinchPoint(pts);
+    const t = millis() * 0.003;
+    ctx.save();
+    if (isPinching) {
+      // Active: pulsing ring
+      const r = 14 + Math.sin(t * 3) * 3;
+      ctx.shadowBlur = 24; ctx.shadowColor = activeColor;
+      ctx.strokeStyle = activeColor; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle = activeColor; ctx.globalAlpha = 0.4;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI*2); ctx.fill();
+    } else {
+      // Idle: dashed circle hint
+      ctx.shadowBlur = 8; ctx.shadowColor = '#0ff';
+      ctx.strokeStyle = 'rgba(0,255,255,0.35)'; ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+</script>
+</body>
+</html>

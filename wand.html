@@ -38,6 +38,15 @@
     max-width: 70%; text-align: center;
   }
   #heard.active { opacity: 1; }
+  #matchScore {
+    position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+    z-index: 10; padding: 4px 12px; border-radius: 4px;
+    background: rgba(0,0,0,0.7); color: #88ff88;
+    font-family: "Courier New", monospace; font-size: 11px; letter-spacing: 1px;
+    text-shadow: 0 0 6px #44ff4488;
+    opacity: 0; transition: opacity 0.25s ease; pointer-events: none;
+  }
+  #matchScore.active { opacity: 1; }
   #armed {
     position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
     z-index: 10; padding: 10px 26px; background: rgba(0,0,0,0.8);
@@ -68,6 +77,7 @@
 </head>
 <body>
 <div id="status">Awakening the wand…</div>
+<div id="reach" style="position:fixed; top:38px; left:12px; z-index:10; padding:4px 10px; background:rgba(0,0,0,0.55); border:1px solid rgba(232,216,160,0.3); border-radius:4px; font-size:10px; letter-spacing:1px; color:#c8b878; font-family:monospace; pointer-events:none;">Wand reach: 1.2× ([ / ])</div>
 <div id="spellbook">
   <h3>SPELLBOOK</h3>
   <div><span class="spell">Avada Kedavra</span> <span class="effect">— killing curse</span></div>
@@ -92,6 +102,7 @@
   </div>
 </div>
 <div id="heard"></div>
+<div id="matchScore"></div>
 <div id="armed"></div>
 <button id="startBtn">Take Up the Wand<small>Camera + microphone required</small></button>
 
@@ -122,8 +133,66 @@ const SPELLS = {
 };
 const ALL_PHRASES = [];
 for (const name in SPELLS) {
-  ALL_PHRASES.push({ phrase: name, spell: name });
-  for (const alias of SPELLS[name].aliases) ALL_PHRASES.push({ phrase: alias, spell: name });
+  ALL_PHRASES.push({ phrase: name, words: name.split(' '), spell: name });
+  for (const alias of SPELLS[name].aliases) {
+    ALL_PHRASES.push({ phrase: alias, words: alias.split(' '), spell: name });
+  }
+}
+
+// =========================================================================
+// FUZZY MATCHING — speech recognition guesses English words for foreign
+// incantations. We compare via Levenshtein distance with a sliding window
+// across recent transcript words.
+// =========================================================================
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  const m = a.length, n = b.length;
+  if (m === 0) return n; if (n === 0) return m;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a.charCodeAt(i-1) === b.charCodeAt(j-1) ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j-1] + 1, prev[j-1] + cost);
+    }
+    const tmp = prev; prev = curr; curr = tmp;
+  }
+  return prev[n];
+}
+function wordSim(a, b) {
+  const d = levenshtein(a, b);
+  const m = Math.max(a.length, b.length, 1);
+  return 1 - d / m;
+}
+// Match transcript against the spell catalog. Returns { spell, score } or null.
+function fuzzyMatchSpell(transcript) {
+  const words = transcript.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return null;
+  let best = { score: 0, spell: null, phrase: null };
+  for (const cand of ALL_PHRASES) {
+    const N = cand.words.length;
+    if (words.length < N) {
+      // Try last-word-only fallback for single transcribed word vs multi-word spell
+      if (N > 1 && words.length === 1) {
+        // Best per-word similarity against any spell word (low weight)
+        let bestWord = 0;
+        for (const sw of cand.words) bestWord = Math.max(bestWord, wordSim(words[0], sw));
+        const score = bestWord * 0.55; // penalize partial-match
+        if (score > best.score) best = { score, spell: cand.spell, phrase: cand.phrase };
+      }
+      continue;
+    }
+    // Slide N-word window through transcript
+    for (let i = 0; i <= words.length - N; i++) {
+      let total = 0;
+      for (let k = 0; k < N; k++) total += wordSim(words[i + k], cand.words[k]);
+      const score = total / N;
+      if (score > best.score) best = { score, spell: cand.spell, phrase: cand.phrase };
+    }
+  }
+  return best.score >= 0.55 ? best : null;
 }
 
 // =========================================================================
@@ -155,6 +224,7 @@ const state = {
 const FLICK_SPEED = 28;            // px per frame
 const ARM_DURATION = 6000;         // ms before armed spell expires
 const HISTORY_FRAMES = 12;
+let WAND_REACH = 1.2;              // multiplier on hand length, [ / ] adjusts
 
 // =========================================================================
 // p5 SETUP
@@ -166,6 +236,15 @@ function setup() {
   spawnDummies();
   document.getElementById('startBtn').addEventListener('click', begin);
   setStatus('Click the button to begin');
+}
+
+function keyPressed() {
+  if (key === '[') { WAND_REACH = Math.max(0.4, WAND_REACH - 0.1); updateReachUI(); }
+  else if (key === ']') { WAND_REACH = Math.min(3.0, WAND_REACH + 0.1); updateReachUI(); }
+}
+function updateReachUI() {
+  const el = document.getElementById('reach');
+  if (el) el.textContent = `Wand reach: ${WAND_REACH.toFixed(1)}× ([ / ])`;
 }
 function windowResized() { resizeCanvas(windowWidth, windowHeight); }
 function setStatus(m) { const e = document.getElementById('status'); if (e) e.textContent = m; }
@@ -227,16 +306,33 @@ function initSpeech() {
     }
     txt = txt.toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
     if (!txt) return;
-    showHeard(txt);
 
-    // Find spell match in transcript (longest match wins)
-    let best = null;
-    for (const { phrase, spell } of ALL_PHRASES) {
-      if (txt.includes(phrase) && (!best || phrase.length > best.phrase.length)) {
-        best = { phrase, spell };
+    // Rolling 3-second word buffer — every word stamped, old ones expire.
+    const t = millis();
+    const newWords = txt.split(/\s+/).filter(Boolean);
+    // Keep only the latest few words to avoid runaway buffer.
+    const tail = newWords.slice(-8);
+    state.wordBuffer = (state.wordBuffer || []).filter(w => t - w.t < 3500);
+    for (const w of tail) state.wordBuffer.push({ word: w, t });
+    // Trim excess
+    while (state.wordBuffer.length > 12) state.wordBuffer.shift();
+
+    const recent = state.wordBuffer.map(w => w.word).join(' ');
+    showHeard(recent);
+
+    const match = fuzzyMatchSpell(recent);
+    if (match) {
+      const last = state.lastMatchAt || {};
+      // Per-spell debounce: 1.2s
+      if (!last[match.spell] || t - last[match.spell] > 1200) {
+        last[match.spell] = t;
+        state.lastMatchAt = last;
+        showMatchScore(match);
+        // Drain buffer so the same words don't re-trigger
+        state.wordBuffer = [];
+        handleSpellHeard(match.spell);
       }
     }
-    if (best) handleSpellHeard(best.spell);
   };
   state.speech = rec;
   try { rec.start(); } catch(e) {}
@@ -249,6 +345,14 @@ function showHeard(txt) {
   el.classList.add('active');
   clearTimeout(showHeard._t);
   showHeard._t = setTimeout(() => el.classList.remove('active'), 2500);
+}
+function showMatchScore(m) {
+  const el = document.getElementById('matchScore');
+  if (!el) return;
+  el.textContent = `→ ${m.spell}  ·  match ${(m.score * 100).toFixed(0)}%`;
+  el.classList.add('active');
+  clearTimeout(showMatchScore._t);
+  showMatchScore._t = setTimeout(() => el.classList.remove('active'), 1800);
 }
 
 function handleSpellHeard(name) {
@@ -306,15 +410,21 @@ function updateWand() {
   const lm = state.latestResults.multiHandLandmarks[0];
   const pts = lm.map(p => ({ x: (1 - p.x) * width, y: p.y * height }));
 
-  // Wand axis: wrist (0) → middle MCP (9), extended outward
+  // Wand axis: wrist (0) → knuckle line center (avg of MCPs 5,9,13,17).
+  // The knuckle line is more stable than a single MCP and gives the
+  // "out of the fist" direction along which the wand actually exits.
   const wrist = pts[0];
-  const mid = pts[9];
-  const dx = mid.x - wrist.x, dy = mid.y - wrist.y;
+  const knuckle = {
+    x: (pts[5].x + pts[9].x + pts[13].x + pts[17].x) / 4,
+    y: (pts[5].y + pts[9].y + pts[13].y + pts[17].y) / 4
+  };
+  const dx = knuckle.x - wrist.x, dy = knuckle.y - wrist.y;
   const handLen = Math.hypot(dx, dy) + 1e-3;
   const dirX = dx / handLen, dirY = dy / handLen;
-  // Wand base = knuckle area, tip = extended ~2.2x hand length
-  const base = { x: mid.x, y: mid.y };
-  const tip = { x: mid.x + dirX * handLen * 2.2, y: mid.y + dirY * handLen * 2.2 };
+  // Base anchored at knuckle line; tip extended by user-adjustable reach
+  const base = { x: knuckle.x, y: knuckle.y };
+  const tip = { x: knuckle.x + dirX * handLen * WAND_REACH,
+                y: knuckle.y + dirY * handLen * WAND_REACH };
 
   state.wandBase = base;
   state.wandTip = tip;
@@ -681,7 +791,6 @@ function applySpellHit(e, d) {
 function draw() {
   const ctx = drawingContext;
   drawBackground(ctx);
-  drawHogwartsArch(ctx);
 
   updateWand();
   tryRelease();
@@ -694,12 +803,11 @@ function draw() {
   drawWand(ctx);
   drawShield(ctx);
   if (state.armedSpell) drawArmingAura(ctx);
-  drawTorches(ctx);
 }
 
 function drawBackground(ctx) {
   if (state.videoEl && state.videoEl.readyState >= 2) {
-    // Mirror + cover-fit the live webcam feed
+    // Mirror + cover-fit the live webcam feed — no theme overlay
     ctx.save();
     ctx.translate(width, 0);
     ctx.scale(-1, 1);
@@ -715,18 +823,6 @@ function drawBackground(ctx) {
     }
     ctx.drawImage(state.videoEl, dx, dy, dw, dh);
     ctx.restore();
-
-    // Dark midnight wash so spell colors stay vivid against skin/scene
-    ctx.fillStyle = 'rgba(5, 4, 18, 0.45)';
-    ctx.fillRect(0, 0, width, height);
-
-    // Vignette to focus attention
-    const grd = ctx.createRadialGradient(width/2, height*0.6, Math.min(width,height)*0.3,
-                                         width/2, height*0.6, Math.max(width,height)*0.75);
-    grd.addColorStop(0, 'rgba(0,0,0,0)');
-    grd.addColorStop(1, 'rgba(0,0,0,0.7)');
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, 0, width, height);
   } else {
     // Pre-camera fallback
     const g = ctx.createRadialGradient(width/2, height*0.85, 0, width/2, height*0.85, Math.max(width,height));

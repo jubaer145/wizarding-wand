@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wand of the Wizarding World</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #02010a; overflow: hidden;
+    font-family: "Cinzel", "Trajan Pro", "Times New Roman", serif; color: #e8d8a0; }
+  #status {
+    position: fixed; top: 12px; left: 12px; z-index: 10;
+    padding: 6px 10px; background: rgba(0,0,0,0.65);
+    border: 1px solid rgba(232, 216, 160, 0.4); border-radius: 4px;
+    font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+    color: #e8d8a0; pointer-events: none;
+  }
+  #spellbook {
+    position: fixed; top: 12px; right: 12px; z-index: 10;
+    padding: 10px 14px; background: rgba(20, 14, 4, 0.85);
+    border: 1px solid rgba(232, 216, 160, 0.3); border-radius: 6px;
+    font-size: 11px; max-width: 260px; line-height: 1.5;
+    color: #c8b878; box-shadow: 0 0 30px rgba(0,0,0,0.6);
+  }
+  #spellbook h3 {
+    margin: 0 0 6px 0; font-size: 13px; letter-spacing: 3px;
+    color: #ffd700; text-shadow: 0 0 8px #ffaa0066;
+    font-weight: normal;
+  }
+  #spellbook .spell { color: #e8d8a0; }
+  #spellbook .effect { color: #8a7a4a; font-style: italic; font-size: 10px; }
+  #heard {
+    position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
+    z-index: 10; padding: 8px 18px; background: rgba(0,0,0,0.7);
+    border-radius: 4px; min-height: 18px;
+    font-size: 14px; letter-spacing: 1px; color: #aabbff;
+    text-shadow: 0 0 8px #6688ff88;
+    font-family: "Courier New", monospace;
+    opacity: 0; transition: opacity 0.3s ease;
+    max-width: 70%; text-align: center;
+  }
+  #heard.active { opacity: 1; }
+  #armed {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 10; padding: 10px 26px; background: rgba(0,0,0,0.8);
+    border: 2px solid currentColor; border-radius: 6px;
+    font-size: 18px; letter-spacing: 4px; text-transform: uppercase;
+    text-shadow: 0 0 14px currentColor; box-shadow: 0 0 24px currentColor;
+    opacity: 0; transition: opacity 0.25s ease;
+    pointer-events: none;
+  }
+  #armed.active { opacity: 1; }
+  #startBtn {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    z-index: 50; padding: 22px 44px; font-size: 18px; letter-spacing: 6px;
+    background: rgba(20, 14, 4, 0.92); color: #ffd700;
+    border: 2px solid #ffd700; border-radius: 8px; cursor: pointer;
+    text-transform: uppercase; text-shadow: 0 0 14px #ffaa00;
+    box-shadow: 0 0 50px #ffaa0055; font-family: inherit;
+  }
+  #startBtn:hover { background: rgba(60, 40, 10, 0.9); }
+  #startBtn small { display: block; font-size: 10px; letter-spacing: 2px;
+    color: #aa9050; margin-top: 8px; }
+  canvas { display: block; }
+  video { display: none !important; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="status">Awakening the wand…</div>
+<div id="spellbook">
+  <h3>SPELLBOOK</h3>
+  <div><span class="spell">Avada Kedavra</span> <span class="effect">— killing curse</span></div>
+  <div><span class="spell">Crucio</span> <span class="effect">— torture</span></div>
+  <div><span class="spell">Sectumsempra</span> <span class="effect">— slashing</span></div>
+  <div><span class="spell">Stupefy</span> <span class="effect">— stun</span></div>
+  <div><span class="spell">Reducto</span> <span class="effect">— purple breaker</span></div>
+  <div><span class="spell">Bombarda</span> <span class="effect">— explosion</span></div>
+  <div><span class="spell">Incendio</span> <span class="effect">— fire stream</span></div>
+  <div><span class="spell">Aguamenti</span> <span class="effect">— water jet</span></div>
+  <div><span class="spell">Glacius</span> <span class="effect">— freezing</span></div>
+  <div><span class="spell">Expecto Patronum</span> <span class="effect">— silver wisp</span></div>
+  <div><span class="spell">Protego</span> <span class="effect">— shield</span></div>
+  <div><span class="spell">Wingardium Leviosa</span> <span class="effect">— levitate</span></div>
+  <div><span class="spell">Accio</span> <span class="effect">— summon</span></div>
+  <div><span class="spell">Depulso</span> <span class="effect">— banish</span></div>
+  <div><span class="spell">Lumos / Nox</span> <span class="effect">— light on/off</span></div>
+  <div><span class="spell">Alohomora / Reparo</span> <span class="effect">— sparkle</span></div>
+  <div style="margin-top:6px; color: #886; font-size: 10px; font-style: italic;">
+    Speak the incantation, then flick the wand to cast.<br>
+    "Mischief Managed" clears all magic.
+  </div>
+</div>
+<div id="heard"></div>
+<div id="armed"></div>
+<button id="startBtn">Take Up the Wand<small>Camera + microphone required</small></button>
+
+<script>
+// =========================================================================
+// SPELL DEFINITIONS
+// =========================================================================
+const SPELLS = {
+  'avada kedavra':       { color: '#39ff14', type: 'beam',     damage: 9999, aliases: ['abracadabra','avadacadabra','avadakadabra'] },
+  'crucio':              { color: '#ff2233', type: 'beam',     damage: 30,   aliases: ['cruccio','krucio'] },
+  'sectumsempra':        { color: '#ff0044', type: 'slash',    damage: 50,   aliases: ['sectum sempra'] },
+  'stupefy':             { color: '#ff7733', type: 'stun',     damage: 15,   aliases: ['stupify','stoopefy'] },
+  'reducto':             { color: '#cc66ff', type: 'beam',     damage: 55,   aliases: ['reducktoe'] },
+  'bombarda':            { color: '#ffaa00', type: 'explode',  damage: 40,   aliases: ['bombardo','bombarda maxima'] },
+  'incendio':            { color: '#ff5511', type: 'fire',     damage: 8,    aliases: ['incendia'] },
+  'aguamenti':           { color: '#3399ff', type: 'water',    damage: 0,    aliases: ['agua menti','aguamente'] },
+  'glacius':             { color: '#aaeeff', type: 'ice',      damage: 0,    aliases: ['glacious'] },
+  'expecto patronum':    { color: '#e8f8ff', type: 'patronus', damage: 0,    aliases: ['expectro patronum','expecto patronam'] },
+  'protego':             { color: '#88ddff', type: 'shield',   damage: 0,    aliases: ['protejo','protago'] },
+  'wingardium leviosa':  { color: '#bbccff', type: 'levitate', damage: 0,    aliases: ['wingardium leviossa','wingardium'] },
+  'accio':               { color: '#ffd58e', type: 'pull',     damage: 0,    aliases: ['acio','akkio'] },
+  'depulso':             { color: '#ffaa44', type: 'push',     damage: 0,    aliases: ['depalso','de pulso'] },
+  'lumos':               { color: '#fff2c0', type: 'lumos',    instant: true,aliases: ['luminos'] },
+  'nox':                 { color: '#000000', type: 'nox',      instant: true,aliases: ['knox'] },
+  'alohomora':           { color: '#ffd700', type: 'sparkle',  damage: 0,    aliases: ['alohamora'] },
+  'reparo':              { color: '#ffe066', type: 'sparkle',  damage: 0,    aliases: ['repairo'] },
+  'mischief managed':    { color: '#888888', type: 'clear',    instant: true,aliases: [] },
+};
+const ALL_PHRASES = [];
+for (const name in SPELLS) {
+  ALL_PHRASES.push({ phrase: name, spell: name });
+  for (const alias of SPELLS[name].aliases) ALL_PHRASES.push({ phrase: alias, spell: name });
+}
+
+// =========================================================================
+// STATE
+// =========================================================================
+const state = {
+  videoEl: null,
+  latestResults: null,
+  camReady: false,
+  speech: null,
+  speechActive: false,
+
+  wandTip: null,        // {x,y}
+  wandBase: null,       // {x,y}
+  wandHistory: [],      // recent {x,y,t}
+  wandSpeed: 0,
+  wandDir: { x: 1, y: 0 },
+
+  armedSpell: null,
+  armedAt: 0,
+  spellCharge: 0,
+
+  lumosOn: false,
+  effects: [],
+  dummies: [],
+  shield: null, // {until, strength}
+};
+
+const FLICK_SPEED = 28;            // px per frame
+const ARM_DURATION = 6000;         // ms before armed spell expires
+const HISTORY_FRAMES = 12;
+
+// =========================================================================
+// p5 SETUP
+// =========================================================================
+function setup() {
+  pixelDensity(1);
+  createCanvas(windowWidth, windowHeight);
+  frameRate(60);
+  spawnDummies();
+  document.getElementById('startBtn').addEventListener('click', begin);
+  setStatus('Click the button to begin');
+}
+function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+function setStatus(m) { const e = document.getElementById('status'); if (e) e.textContent = m; }
+
+function begin() {
+  document.getElementById('startBtn').remove();
+  initSpeech();
+  initMediaPipe();
+  setStatus('Granting permissions…');
+}
+
+// =========================================================================
+// MEDIAPIPE HANDS
+// =========================================================================
+function initMediaPipe() {
+  state.videoEl = document.createElement('video');
+  state.videoEl.setAttribute('playsinline', '');
+  state.videoEl.muted = true;
+  document.body.appendChild(state.videoEl);
+
+  const hands = new Hands({
+    locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+  });
+  hands.setOptions({
+    maxNumHands: 1, modelComplexity: 1,
+    minDetectionConfidence: 0.6, minTrackingConfidence: 0.5
+  });
+  hands.onResults((r) => {
+    state.latestResults = r;
+    if (!state.camReady) { state.camReady = true; setStatus('Speak. Then flick.'); }
+  });
+  const cam = new Camera(state.videoEl, {
+    onFrame: async () => { await hands.send({ image: state.videoEl }); },
+    width: 1280, height: 720
+  });
+  cam.start().catch(e => setStatus('Camera error: ' + e.message));
+}
+
+// =========================================================================
+// SPEECH RECOGNITION
+// =========================================================================
+function initSpeech() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { setStatus('Speech not supported (use Chrome)'); return; }
+  const rec = new SR();
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.lang = 'en-US';
+  rec.onstart = () => { state.speechActive = true; };
+  rec.onerror = (e) => { console.warn('speech error', e.error); };
+  rec.onend = () => {
+    state.speechActive = false;
+    setTimeout(() => { try { rec.start(); } catch(e) {} }, 300);
+  };
+  rec.onresult = (ev) => {
+    let txt = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      txt += ev.results[i][0].transcript + ' ';
+    }
+    txt = txt.toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
+    if (!txt) return;
+    showHeard(txt);
+
+    // Find spell match in transcript (longest match wins)
+    let best = null;
+    for (const { phrase, spell } of ALL_PHRASES) {
+      if (txt.includes(phrase) && (!best || phrase.length > best.phrase.length)) {
+        best = { phrase, spell };
+      }
+    }
+    if (best) handleSpellHeard(best.spell);
+  };
+  state.speech = rec;
+  try { rec.start(); } catch(e) {}
+}
+
+function showHeard(txt) {
+  const el = document.getElementById('heard');
+  if (!el) return;
+  el.textContent = '"' + txt.slice(-60) + '"';
+  el.classList.add('active');
+  clearTimeout(showHeard._t);
+  showHeard._t = setTimeout(() => el.classList.remove('active'), 2500);
+}
+
+function handleSpellHeard(name) {
+  const def = SPELLS[name];
+  if (!def) return;
+
+  if (def.instant) {
+    castInstant(name, def);
+    return;
+  }
+  // Arm the spell
+  state.armedSpell = name;
+  state.armedAt = millis();
+  state.spellCharge = 0;
+  showArmed(name, def.color);
+}
+
+function showArmed(name, color) {
+  const el = document.getElementById('armed');
+  if (!el) return;
+  el.textContent = name.toUpperCase();
+  el.style.color = color;
+  el.classList.add('active');
+}
+function hideArmed() {
+  const el = document.getElementById('armed');
+  if (el) el.classList.remove('active');
+}
+
+function castInstant(name, def) {
+  if (def.type === 'lumos') state.lumosOn = true;
+  else if (def.type === 'nox') state.lumosOn = false;
+  else if (def.type === 'clear') {
+    state.effects.length = 0;
+    state.armedSpell = null;
+    state.shield = null;
+    state.lumosOn = false;
+    for (const d of state.dummies) {
+      d.status = 'normal'; d.statusUntil = 0;
+      d.health = d.maxHealth; d.alive = true;
+      d.burnUntil = 0; d.frozenUntil = 0; d.levitating = false;
+    }
+    hideArmed();
+  }
+}
+
+// =========================================================================
+// WAND TRACKING
+// =========================================================================
+function updateWand() {
+  if (!state.latestResults || !state.latestResults.multiHandLandmarks ||
+      state.latestResults.multiHandLandmarks.length === 0) {
+    state.wandTip = null; state.wandBase = null; return;
+  }
+  const lm = state.latestResults.multiHandLandmarks[0];
+  const pts = lm.map(p => ({ x: (1 - p.x) * width, y: p.y * height }));
+
+  // Wand axis: wrist (0) → middle MCP (9), extended outward
+  const wrist = pts[0];
+  const mid = pts[9];
+  const dx = mid.x - wrist.x, dy = mid.y - wrist.y;
+  const handLen = Math.hypot(dx, dy) + 1e-3;
+  const dirX = dx / handLen, dirY = dy / handLen;
+  // Wand base = knuckle area, tip = extended ~2.2x hand length
+  const base = { x: mid.x, y: mid.y };
+  const tip = { x: mid.x + dirX * handLen * 2.2, y: mid.y + dirY * handLen * 2.2 };
+
+  state.wandBase = base;
+  state.wandTip = tip;
+  state.wandDir = { x: dirX, y: dirY };
+  state.handPts = pts;
+
+  // History + speed
+  state.wandHistory.push({ x: tip.x, y: tip.y, t: millis() });
+  while (state.wandHistory.length > HISTORY_FRAMES) state.wandHistory.shift();
+  if (state.wandHistory.length >= 3) {
+    const a = state.wandHistory[state.wandHistory.length - 3];
+    const b = state.wandHistory[state.wandHistory.length - 1];
+    state.wandSpeed = Math.hypot(b.x - a.x, b.y - a.y) / 2;
+  } else state.wandSpeed = 0;
+}
+
+function tryRelease() {
+  if (!state.armedSpell || !state.wandTip) return;
+  if (millis() - state.armedAt > ARM_DURATION) {
+    state.armedSpell = null; hideArmed(); return;
+  }
+  // Charge while waiting
+  state.spellCharge = Math.min(1, state.spellCharge + 0.025);
+
+  if (state.wandSpeed > FLICK_SPEED && state.spellCharge > 0.4) {
+    const name = state.armedSpell;
+    const def = SPELLS[name];
+    fireSpell(name, def);
+    state.armedSpell = null;
+    state.spellCharge = 0;
+    hideArmed();
+  }
+}
+
+// =========================================================================
+// SPELL EFFECTS
+// =========================================================================
+function fireSpell(name, def) {
+  const tip = { ...state.wandTip };
+  const dir = { ...state.wandDir };
+  const t = millis();
+
+  switch (def.type) {
+    case 'beam':
+    case 'fire':
+    case 'water':
+    case 'ice':
+      state.effects.push({
+        kind: 'beam', spell: name, color: def.color, type: def.type,
+        origin: tip, dir, damage: def.damage,
+        bornAt: t, life: def.type === 'beam' ? 600 : 1200,
+        progress: 0, hit: false, particles: []
+      });
+      break;
+    case 'slash':
+      state.effects.push({
+        kind: 'slash', spell: name, color: def.color,
+        origin: tip, dir, damage: def.damage, bornAt: t, life: 700
+      });
+      break;
+    case 'stun':
+      state.effects.push({
+        kind: 'stun', spell: name, color: def.color,
+        origin: tip, dir, damage: def.damage, bornAt: t, life: 600,
+        progress: 0
+      });
+      break;
+    case 'explode':
+      state.effects.push({
+        kind: 'explode', spell: name, color: def.color,
+        origin: tip, dir, damage: def.damage, bornAt: t, life: 1200,
+        progress: 0
+      });
+      break;
+    case 'patronus':
+      state.effects.push({
+        kind: 'patronus', spell: name, color: def.color,
+        origin: tip, dir, bornAt: t, life: 4000,
+        wisps: Array.from({length: 60}, () => ({
+          x: tip.x + (Math.random() - 0.5) * 40,
+          y: tip.y + (Math.random() - 0.5) * 40,
+          vx: dir.x * (2 + Math.random() * 3) + (Math.random() - 0.5),
+          vy: dir.y * (2 + Math.random() * 3) + (Math.random() - 0.5),
+          life: 1
+        }))
+      });
+      break;
+    case 'shield':
+      state.shield = { until: t + 5000, strength: 1, origin: { x: width/2, y: height/2 } };
+      break;
+    case 'levitate':
+      // Lift all alive dummies upward briefly
+      for (const d of state.dummies) {
+        if (d.alive) { d.levitateUntil = t + 3000; d.vy = -2; }
+      }
+      state.effects.push({ kind: 'aura', color: def.color, origin: tip, bornAt: t, life: 800 });
+      break;
+    case 'pull':
+      // Drag dummies toward player (bottom center)
+      for (const d of state.dummies) {
+        if (d.alive) {
+          const target = { x: width/2, y: height * 0.85 };
+          const ddx = target.x - d.x, ddy = target.y - d.y;
+          const m = Math.hypot(ddx, ddy) + 1e-3;
+          d.vx += (ddx/m) * 6;
+          d.vy += (ddy/m) * 6;
+        }
+      }
+      state.effects.push({ kind: 'streak', color: def.color, origin: tip, bornAt: t, life: 800, dirSign: -1 });
+      break;
+    case 'push':
+      for (const d of state.dummies) {
+        if (d.alive) {
+          const ddx = d.x - tip.x, ddy = d.y - tip.y;
+          const m = Math.hypot(ddx, ddy) + 1e-3;
+          d.vx += (ddx/m) * 12;
+          d.vy += (ddy/m) * 12;
+        }
+      }
+      state.effects.push({ kind: 'streak', color: def.color, origin: tip, bornAt: t, life: 800, dirSign: 1, dir });
+      break;
+    case 'sparkle':
+      state.effects.push({
+        kind: 'sparkle', color: def.color,
+        origin: tip, bornAt: t, life: 1500,
+        particles: Array.from({length: 30}, () => ({
+          x: tip.x, y: tip.y,
+          vx: (Math.random() - 0.5) * 4,
+          vy: (Math.random() - 0.5) * 4 - 2,
+          life: 1, size: 1 + Math.random() * 2
+        }))
+      });
+      break;
+  }
+}
+
+// =========================================================================
+// DUMMIES (Death Eaters)
+// =========================================================================
+function spawnDummies() {
+  state.dummies = [];
+  const N = 3;
+  for (let i = 0; i < N; i++) {
+    state.dummies.push(makeDummy());
+  }
+}
+function makeDummy() {
+  return {
+    x: 200 + Math.random() * (window.innerWidth - 400),
+    y: 100 + Math.random() * (window.innerHeight * 0.5),
+    vx: (Math.random() - 0.5) * 0.6,
+    vy: (Math.random() - 0.5) * 0.4,
+    health: 100, maxHealth: 100, alive: true,
+    deadAt: 0,
+    status: 'normal', statusUntil: 0,
+    burnUntil: 0, frozenUntil: 0,
+    levitateUntil: 0,
+    sway: Math.random() * Math.PI * 2,
+    bornAt: millis(), respawnAt: 0
+  };
+}
+
+function updateDummies() {
+  const t = millis();
+  for (const d of state.dummies) {
+    if (!d.alive) {
+      if (d.respawnAt && t > d.respawnAt) Object.assign(d, makeDummy());
+      continue;
+    }
+    if (d.frozenUntil > t) {
+      // Frozen: no motion
+      d.vx *= 0.7; d.vy *= 0.7;
+    } else if (d.statusUntil > t && d.status === 'stunned') {
+      d.vx *= 0.85; d.vy *= 0.85;
+    } else {
+      d.sway += 0.02;
+      d.x += d.vx + Math.sin(d.sway) * 0.4;
+      d.y += d.vy + Math.cos(d.sway * 1.3) * 0.3;
+      d.vx *= 0.96; d.vy *= 0.96;
+      // soft bounds
+      if (d.x < 100) d.vx += 0.2;
+      if (d.x > width - 100) d.vx -= 0.2;
+      if (d.y < 80) d.vy += 0.2;
+      if (d.y > height - 200) d.vy -= 0.2;
+
+      if (d.levitateUntil > t) {
+        d.vy -= 0.3;
+      } else {
+        // gentle drift
+        if (Math.random() < 0.005) { d.vx += (Math.random() - 0.5) * 1.2; d.vy += (Math.random() - 0.5) * 0.6; }
+      }
+    }
+    if (d.statusUntil < t) d.status = 'normal';
+    if (d.burnUntil > t && Math.random() < 0.5) {
+      d.health -= 0.4;
+      // burn particles
+      state.effects.push({
+        kind: 'particle', color: '#ff7733', origin: { x: d.x, y: d.y - 30 },
+        bornAt: t, life: 600,
+        particles: [{ x: d.x + (Math.random()-0.5)*30, y: d.y - 30, vx: (Math.random()-0.5)*1, vy: -2, life: 1, size: 2 }]
+      });
+    }
+    if (d.health <= 0 && d.alive) killDummy(d, '#ff5544');
+  }
+}
+
+function killDummy(d, color) {
+  d.alive = false;
+  d.deadAt = millis();
+  d.respawnAt = millis() + 4000;
+  state.effects.push({
+    kind: 'burst', color, origin: { x: d.x, y: d.y },
+    bornAt: millis(), life: 1200,
+    particles: Array.from({length: 50}, () => {
+      const a = Math.random() * Math.PI * 2;
+      const s = 2 + Math.random() * 6;
+      return { x: d.x, y: d.y, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: 1, size: 2 + Math.random()*3 };
+    })
+  });
+}
+
+// =========================================================================
+// EFFECT UPDATES + COLLISIONS
+// =========================================================================
+function updateEffects() {
+  const t = millis();
+  for (let i = state.effects.length - 1; i >= 0; i--) {
+    const e = state.effects[i];
+    const age = t - e.bornAt;
+    if (age > e.life) { state.effects.splice(i, 1); continue; }
+
+    if (e.kind === 'beam') {
+      const speed = e.type === 'beam' ? 24 : 14;
+      e.progress += speed;
+      const tipX = e.origin.x + e.dir.x * e.progress;
+      const tipY = e.origin.y + e.dir.y * e.progress;
+      // particle trail
+      e.particles.push({ x: tipX, y: tipY, life: 1 });
+      if (e.particles.length > 60) e.particles.shift();
+      for (const p of e.particles) p.life -= 0.04;
+
+      // hit detection
+      if (!e.hit) {
+        for (const d of state.dummies) {
+          if (!d.alive) continue;
+          const dx = tipX - d.x, dy = tipY - d.y;
+          if (dx*dx + dy*dy < 60*60) {
+            applySpellHit(e, d);
+            e.hit = true;
+            e.life = age + 300; // tail off after hit
+            break;
+          }
+        }
+      }
+    } else if (e.kind === 'slash') {
+      // slash near origin only
+      if (age < 100) {
+        for (const d of state.dummies) {
+          if (!d.alive) continue;
+          const dx = e.origin.x - d.x, dy = e.origin.y - d.y;
+          if (dx*dx + dy*dy < 250*250) {
+            applySpellHit(e, d);
+          }
+        }
+      }
+    } else if (e.kind === 'stun') {
+      e.progress += 18;
+      const tipX = e.origin.x + e.dir.x * e.progress;
+      const tipY = e.origin.y + e.dir.y * e.progress;
+      if (!e.hit) {
+        for (const d of state.dummies) {
+          if (!d.alive) continue;
+          if (Math.hypot(tipX - d.x, tipY - d.y) < 70) {
+            d.status = 'stunned'; d.statusUntil = t + 3000;
+            d.health -= e.damage;
+            if (d.health <= 0) killDummy(d, e.color);
+            e.hit = true;
+            e.life = age + 200;
+            break;
+          }
+        }
+      }
+    } else if (e.kind === 'explode') {
+      e.progress += 22;
+      const tipX = e.origin.x + e.dir.x * e.progress;
+      const tipY = e.origin.y + e.dir.y * e.progress;
+      // detonate when traveling for ~25 frames OR near a dummy
+      let detonate = e.progress > 600;
+      let hitX = tipX, hitY = tipY;
+      for (const d of state.dummies) {
+        if (!d.alive) continue;
+        if (Math.hypot(tipX - d.x, tipY - d.y) < 60) {
+          detonate = true; hitX = d.x; hitY = d.y; break;
+        }
+      }
+      if (detonate && !e.detonated) {
+        e.detonated = true;
+        e.detonateAt = t;
+        e.detX = hitX; e.detY = hitY;
+        // damage all in radius
+        for (const d of state.dummies) {
+          if (!d.alive) continue;
+          const dist = Math.hypot(hitX - d.x, hitY - d.y);
+          if (dist < 220) {
+            d.health -= e.damage * (1 - dist/220);
+            const f = (1 - dist/220);
+            const ddx = d.x - hitX, ddy = d.y - hitY;
+            const m = Math.hypot(ddx, ddy) + 1e-3;
+            d.vx += (ddx/m) * 18 * f;
+            d.vy += (ddy/m) * 18 * f;
+            if (d.health <= 0) killDummy(d, e.color);
+          }
+        }
+      }
+      if (e.detonated && t - e.detonateAt > 800) e.life = age;
+    } else if (e.kind === 'patronus') {
+      for (const w of e.wisps) {
+        w.x += w.vx; w.y += w.vy;
+        w.vx *= 0.985; w.vy *= 0.985;
+        w.vx += (Math.random() - 0.5) * 0.4;
+        w.vy += (Math.random() - 0.5) * 0.4 - 0.05;
+        w.life -= 0.005;
+      }
+    } else if (e.kind === 'sparkle' || e.kind === 'burst' || e.kind === 'particle') {
+      for (const p of e.particles) {
+        p.x += p.vx; p.y += p.vy;
+        p.vy += 0.08;
+        p.vx *= 0.97; p.vy *= 0.97;
+        p.life -= 0.015;
+      }
+    }
+  }
+}
+
+function applySpellHit(e, d) {
+  const t = millis();
+  const def = SPELLS[e.spell];
+  if (!def) return;
+  if (def.type === 'beam' && e.spell === 'avada kedavra') {
+    killDummy(d, e.color);
+  } else if (def.type === 'beam') {
+    d.health -= def.damage;
+    if (def.color) d.lastHitColor = def.color;
+    if (d.health <= 0) killDummy(d, def.color);
+  } else if (def.type === 'slash') {
+    d.health -= def.damage;
+    d.slashAt = t;
+    if (d.health <= 0) killDummy(d, def.color);
+  } else if (def.type === 'fire') {
+    d.burnUntil = t + 3000;
+    d.health -= def.damage;
+    if (d.health <= 0) killDummy(d, def.color);
+  } else if (def.type === 'water') {
+    if (d.burnUntil > t) d.burnUntil = 0; // douse fire
+    d.vy += 1; d.vx += e.dir.x * 1.5;
+  } else if (def.type === 'ice') {
+    d.frozenUntil = t + 3500;
+  }
+}
+
+// =========================================================================
+// RENDERING
+// =========================================================================
+function draw() {
+  const ctx = drawingContext;
+  drawBackground(ctx);
+  drawHogwartsArch(ctx);
+
+  updateWand();
+  tryRelease();
+  updateDummies();
+  updateEffects();
+
+  // Render order: dummies → effects → wand → shield → arm UI
+  drawDummies(ctx);
+  drawEffects(ctx);
+  drawWand(ctx);
+  drawShield(ctx);
+  if (state.armedSpell) drawArmingAura(ctx);
+  drawTorches(ctx);
+}
+
+function drawBackground(ctx) {
+  // deep midnight stone gradient
+  const g = ctx.createRadialGradient(width/2, height*0.85, 0, width/2, height*0.85, Math.max(width,height));
+  g.addColorStop(0, '#0a0815');
+  g.addColorStop(0.5, '#04030a');
+  g.addColorStop(1, '#000000');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, width, height);
+
+  // faint stone texture: noise dots
+  ctx.save();
+  ctx.fillStyle = 'rgba(60, 50, 40, 0.04)';
+  // pseudo-noise: use sine grid
+  for (let i = 0; i < 80; i++) {
+    const x = (i * 173) % width;
+    const y = (i * 277) % height;
+    ctx.fillRect(x, y, 60, 60);
+  }
+  ctx.restore();
+}
+
+function drawHogwartsArch(ctx) {
+  ctx.save();
+  // Pillars on left and right
+  const pillarW = Math.min(180, width * 0.12);
+  const archStart = pillarW * 0.6;
+
+  ctx.fillStyle = 'rgba(15, 12, 8, 0.95)';
+  // left pillar
+  ctx.fillRect(0, 0, pillarW, height);
+  // right pillar
+  ctx.fillRect(width - pillarW, 0, pillarW, height);
+
+  // Pointed arch at top (gothic)
+  const archPeakY = height * 0.18;
+  const archBaseY = height * 0.55;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(width, 0);
+  ctx.lineTo(width, archBaseY);
+  ctx.lineTo(width - pillarW, archBaseY);
+  // right curve
+  ctx.bezierCurveTo(
+    width - pillarW, archPeakY,
+    width/2 + 80, archPeakY - 60,
+    width/2, archPeakY - 80
+  );
+  ctx.bezierCurveTo(
+    width/2 - 80, archPeakY - 60,
+    pillarW, archPeakY,
+    pillarW, archBaseY
+  );
+  ctx.lineTo(0, archBaseY);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(8, 7, 5, 0.92)';
+  ctx.fill();
+
+  // stone block lines on pillars
+  ctx.strokeStyle = 'rgba(80, 70, 55, 0.18)';
+  ctx.lineWidth = 1;
+  for (let y = 0; y < height; y += 60) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(pillarW, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(width - pillarW, y); ctx.lineTo(width, y); ctx.stroke();
+  }
+  // vertical mortar
+  ctx.beginPath(); ctx.moveTo(pillarW * 0.5, 0); ctx.lineTo(pillarW * 0.5, height); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(width - pillarW * 0.5, 0); ctx.lineTo(width - pillarW * 0.5, height); ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawTorches(ctx) {
+  // Flickering torches at top of pillars
+  const t = millis() * 0.005;
+  const flick = 0.7 + Math.sin(t * 7) * 0.15 + Math.sin(t * 13) * 0.1;
+  const pillarW = Math.min(180, width * 0.12);
+  const torches = [
+    { x: pillarW * 0.5, y: height * 0.22 },
+    { x: width - pillarW * 0.5, y: height * 0.22 }
+  ];
+  for (const tor of torches) {
+    ctx.save();
+    const grd = ctx.createRadialGradient(tor.x, tor.y, 0, tor.x, tor.y, 220 * flick);
+    grd.addColorStop(0, `rgba(255, 180, 80, ${0.55 * flick})`);
+    grd.addColorStop(0.4, `rgba(255, 100, 40, ${0.18 * flick})`);
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(tor.x - 220, tor.y - 220, 440, 440);
+    // flame core
+    ctx.shadowBlur = 20; ctx.shadowColor = '#ff9933';
+    ctx.fillStyle = `rgba(255, 200, 100, ${flick})`;
+    ctx.beginPath();
+    ctx.ellipse(tor.x, tor.y, 6, 14 * flick, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawDummies(ctx) {
+  const t = millis();
+  for (const d of state.dummies) {
+    if (!d.alive) continue;
+    ctx.save();
+    // Cloaked figure: tall hood shape
+    const w = 60, h = 110;
+    const cx = d.x, cy = d.y;
+
+    // outer aura per status
+    if (d.frozenUntil > t) {
+      ctx.shadowBlur = 22; ctx.shadowColor = '#aaeeff';
+      ctx.fillStyle = 'rgba(170, 230, 255, 0.18)';
+      ctx.beginPath(); ctx.ellipse(cx, cy, w*0.9, h*0.7, 0, 0, Math.PI*2); ctx.fill();
+    } else if (d.burnUntil > t) {
+      const f = 0.6 + Math.sin(t*0.02) * 0.4;
+      ctx.shadowBlur = 30; ctx.shadowColor = '#ff7733';
+      ctx.fillStyle = `rgba(255, 90, 30, ${0.25 * f})`;
+      ctx.beginPath(); ctx.ellipse(cx, cy, w*0.9, h*0.7, 0, 0, Math.PI*2); ctx.fill();
+    } else if (d.statusUntil > t && d.status === 'stunned') {
+      ctx.fillStyle = 'rgba(255, 100, 50, 0.15)';
+      ctx.beginPath(); ctx.ellipse(cx, cy, w, h*0.7, 0, 0, Math.PI*2); ctx.fill();
+    }
+
+    // Cloak body
+    ctx.fillStyle = '#0a0810';
+    ctx.shadowBlur = 14; ctx.shadowColor = '#000';
+    ctx.beginPath();
+    ctx.moveTo(cx - w/2, cy + h/2);
+    ctx.quadraticCurveTo(cx - w*0.7, cy, cx - w*0.4, cy - h*0.3);
+    // hood top
+    ctx.quadraticCurveTo(cx, cy - h*0.7, cx + w*0.4, cy - h*0.3);
+    ctx.quadraticCurveTo(cx + w*0.7, cy, cx + w/2, cy + h/2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Hood interior shadow
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - h*0.25, w*0.3, h*0.18, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // glowing eyes
+    ctx.shadowBlur = 10;
+    if (d.statusUntil > t && d.status === 'stunned') {
+      ctx.shadowColor = '#ff5544'; ctx.fillStyle = '#ff7755';
+    } else if (d.frozenUntil > t) {
+      ctx.shadowColor = '#88ddff'; ctx.fillStyle = '#bbeeff';
+    } else {
+      ctx.shadowColor = '#ff4422'; ctx.fillStyle = '#ff6644';
+    }
+    ctx.beginPath(); ctx.arc(cx - 8, cy - h*0.28, 2.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 8, cy - h*0.28, 2.5, 0, Math.PI*2); ctx.fill();
+
+    // Frozen overlay: ice crystals
+    if (d.frozenUntil > t) {
+      ctx.strokeStyle = 'rgba(200, 240, 255, 0.7)';
+      ctx.lineWidth = 1.5;
+      ctx.shadowBlur = 8; ctx.shadowColor = '#aaeeff';
+      for (let i = 0; i < 6; i++) {
+        const ang = (i / 6) * Math.PI * 2;
+        const x1 = cx + Math.cos(ang) * 18;
+        const y1 = cy + Math.sin(ang) * 30;
+        const x2 = cx + Math.cos(ang) * 32;
+        const y2 = cy + Math.sin(ang) * 50;
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      }
+    }
+
+    // Slash marks
+    if (d.slashAt && t - d.slashAt < 800) {
+      const a = (t - d.slashAt) / 800;
+      ctx.strokeStyle = `rgba(255, 30, 60, ${1 - a})`;
+      ctx.lineWidth = 3;
+      ctx.shadowBlur = 16; ctx.shadowColor = '#ff0044';
+      ctx.beginPath(); ctx.moveTo(cx - 20, cy - 20); ctx.lineTo(cx + 20, cy + 30); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx + 18, cy - 25); ctx.lineTo(cx - 22, cy + 22); ctx.stroke();
+    }
+
+    // Health bar
+    ctx.shadowBlur = 0;
+    const hbW = 50, hbH = 4;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(cx - hbW/2, cy - h/2 - 12, hbW, hbH);
+    ctx.fillStyle = d.health > 50 ? '#39ff14' : d.health > 25 ? '#ffaa00' : '#ff3322';
+    ctx.fillRect(cx - hbW/2, cy - h/2 - 12, hbW * Math.max(0, d.health/d.maxHealth), hbH);
+
+    ctx.restore();
+  }
+}
+
+function drawEffects(ctx) {
+  const t = millis();
+  for (const e of state.effects) {
+    const age = t - e.bornAt;
+    const lifeFrac = Math.max(0, 1 - age / e.life);
+    ctx.save();
+    if (e.kind === 'beam') {
+      const tipX = e.origin.x + e.dir.x * e.progress;
+      const tipY = e.origin.y + e.dir.y * e.progress;
+      // particle trail
+      for (const p of e.particles) {
+        if (p.life <= 0) continue;
+        ctx.shadowBlur = 18; ctx.shadowColor = e.color;
+        ctx.fillStyle = e.color;
+        ctx.globalAlpha = p.life;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      // beam line
+      ctx.shadowBlur = 30; ctx.shadowColor = e.color;
+      ctx.strokeStyle = e.color;
+      ctx.lineWidth = 6;
+      ctx.beginPath(); ctx.moveTo(e.origin.x, e.origin.y); ctx.lineTo(tipX, tipY); ctx.stroke();
+      ctx.shadowBlur = 8; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(e.origin.x, e.origin.y); ctx.lineTo(tipX, tipY); ctx.stroke();
+      // head explosion if killing
+      if (e.spell === 'avada kedavra') {
+        ctx.shadowBlur = 40; ctx.shadowColor = e.color;
+        ctx.fillStyle = e.color;
+        ctx.beginPath(); ctx.arc(tipX, tipY, 14 + Math.sin(t*0.04)*4, 0, Math.PI*2); ctx.fill();
+      }
+    } else if (e.kind === 'slash') {
+      ctx.shadowBlur = 30; ctx.shadowColor = e.color;
+      ctx.strokeStyle = e.color; ctx.lineWidth = 5;
+      ctx.globalAlpha = lifeFrac;
+      const len = 200;
+      const perpX = -e.dir.y, perpY = e.dir.x;
+      const cx = e.origin.x + e.dir.x * 40, cy = e.origin.y + e.dir.y * 40;
+      ctx.beginPath();
+      ctx.moveTo(cx - perpX*len/2, cy - perpY*len/2);
+      ctx.lineTo(cx + perpX*len/2, cy + perpY*len/2);
+      ctx.stroke();
+      // second slash
+      ctx.beginPath();
+      ctx.moveTo(cx + e.dir.x*30 - perpX*len/2, cy + e.dir.y*30 - perpY*len/2);
+      ctx.lineTo(cx + e.dir.x*30 + perpX*len/2, cy + e.dir.y*30 + perpY*len/2);
+      ctx.stroke();
+    } else if (e.kind === 'stun') {
+      const tipX = e.origin.x + e.dir.x * e.progress;
+      const tipY = e.origin.y + e.dir.y * e.progress;
+      ctx.shadowBlur = 26; ctx.shadowColor = e.color;
+      ctx.strokeStyle = e.color; ctx.lineWidth = 4;
+      // wavy bolt
+      ctx.beginPath();
+      const segs = 12;
+      for (let i = 0; i <= segs; i++) {
+        const f = i / segs;
+        const x = lerp(e.origin.x, tipX, f);
+        const y = lerp(e.origin.y, tipY, f);
+        const perpX = -e.dir.y, perpY = e.dir.x;
+        const w = Math.sin(f * Math.PI * 6 + t * 0.02) * 12 * (1 - Math.abs(f - 0.5) * 1.6);
+        if (i === 0) ctx.moveTo(x + perpX*w, y + perpY*w);
+        else ctx.lineTo(x + perpX*w, y + perpY*w);
+      }
+      ctx.stroke();
+    } else if (e.kind === 'explode') {
+      if (!e.detonated) {
+        const tipX = e.origin.x + e.dir.x * e.progress;
+        const tipY = e.origin.y + e.dir.y * e.progress;
+        ctx.shadowBlur = 30; ctx.shadowColor = e.color;
+        ctx.fillStyle = e.color;
+        ctx.beginPath(); ctx.arc(tipX, tipY, 10, 0, Math.PI*2); ctx.fill();
+      } else {
+        const dt = t - e.detonateAt;
+        const r = 220 * (dt / 800);
+        const a = Math.max(0, 1 - dt/800);
+        ctx.shadowBlur = 40; ctx.shadowColor = e.color;
+        ctx.strokeStyle = e.color; ctx.lineWidth = 6;
+        ctx.globalAlpha = a;
+        ctx.beginPath(); ctx.arc(e.detX, e.detY, r, 0, Math.PI*2); ctx.stroke();
+        ctx.fillStyle = e.color; ctx.globalAlpha = a * 0.3;
+        ctx.beginPath(); ctx.arc(e.detX, e.detY, r * 0.7, 0, Math.PI*2); ctx.fill();
+      }
+    } else if (e.kind === 'patronus') {
+      for (const w of e.wisps) {
+        if (w.life <= 0) continue;
+        ctx.shadowBlur = 22; ctx.shadowColor = '#ddeeff';
+        ctx.globalAlpha = w.life;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.arc(w.x, w.y, 3 + w.life * 2, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#bbddff'; ctx.shadowColor = '#88bbff';
+        ctx.beginPath(); ctx.arc(w.x, w.y, 6 * w.life, 0, Math.PI*2); ctx.fill();
+      }
+    } else if (e.kind === 'sparkle' || e.kind === 'burst' || e.kind === 'particle') {
+      for (const p of e.particles) {
+        if (p.life <= 0) continue;
+        ctx.shadowBlur = 16; ctx.shadowColor = e.color;
+        ctx.fillStyle = e.color;
+        ctx.globalAlpha = p.life;
+        ctx.beginPath(); ctx.arc(p.x, p.y, (p.size || 2) * p.life, 0, Math.PI*2); ctx.fill();
+      }
+    } else if (e.kind === 'aura') {
+      const r = 80 + (age / e.life) * 120;
+      ctx.shadowBlur = 30; ctx.shadowColor = e.color;
+      ctx.strokeStyle = e.color; ctx.lineWidth = 3;
+      ctx.globalAlpha = lifeFrac;
+      ctx.beginPath(); ctx.arc(e.origin.x, e.origin.y, r, 0, Math.PI*2); ctx.stroke();
+    } else if (e.kind === 'streak') {
+      ctx.shadowBlur = 22; ctx.shadowColor = e.color;
+      ctx.strokeStyle = e.color; ctx.lineWidth = 4;
+      ctx.globalAlpha = lifeFrac;
+      const len = 180 * (age / e.life);
+      const dir = e.dir || { x: 0, y: -1 };
+      ctx.beginPath();
+      ctx.moveTo(e.origin.x, e.origin.y);
+      ctx.lineTo(e.origin.x + dir.x * len * e.dirSign, e.origin.y + dir.y * len * e.dirSign);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+}
+
+function drawWand(ctx) {
+  if (!state.wandTip || !state.wandBase) return;
+  const t = millis();
+  ctx.save();
+
+  // Wand shaft (thin tapered line from base toward tip)
+  ctx.strokeStyle = '#3a2410';
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.shadowBlur = 4; ctx.shadowColor = '#000';
+  ctx.beginPath();
+  ctx.moveTo(state.wandBase.x, state.wandBase.y);
+  ctx.lineTo(state.wandTip.x, state.wandTip.y);
+  ctx.stroke();
+
+  ctx.strokeStyle = '#7a5028';
+  ctx.lineWidth = 2;
+  ctx.shadowBlur = 0;
+  ctx.beginPath();
+  ctx.moveTo(state.wandBase.x, state.wandBase.y);
+  ctx.lineTo(state.wandTip.x, state.wandTip.y);
+  ctx.stroke();
+
+  // Wand tip glow (Lumos OR armed-spell charging OR generic faint)
+  let glowColor = null, glowStrength = 0;
+  if (state.armedSpell) {
+    glowColor = SPELLS[state.armedSpell].color;
+    glowStrength = state.spellCharge;
+  } else if (state.lumosOn) {
+    glowColor = '#fff2c0';
+    glowStrength = 1;
+  } else {
+    glowColor = '#ffcc66';
+    glowStrength = 0.15;
+  }
+
+  const r = 6 + glowStrength * 18 + Math.sin(t*0.01) * 1.5;
+  ctx.shadowBlur = 30 + glowStrength * 30;
+  ctx.shadowColor = glowColor;
+  ctx.fillStyle = glowColor;
+  ctx.globalAlpha = 0.45 + glowStrength * 0.55;
+  ctx.beginPath();
+  ctx.arc(state.wandTip.x, state.wandTip.y, r, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ffffff';
+  ctx.globalAlpha = 0.9;
+  ctx.beginPath();
+  ctx.arc(state.wandTip.x, state.wandTip.y, Math.max(2, r * 0.3), 0, Math.PI*2);
+  ctx.fill();
+
+  // Lumos cone
+  if (state.lumosOn) {
+    const grd = ctx.createRadialGradient(state.wandTip.x, state.wandTip.y, 0, state.wandTip.x, state.wandTip.y, 320);
+    grd.addColorStop(0, 'rgba(255, 240, 200, 0.55)');
+    grd.addColorStop(0.5, 'rgba(255, 220, 150, 0.18)');
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = grd;
+    ctx.fillRect(state.wandTip.x - 320, state.wandTip.y - 320, 640, 640);
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // Faint hand silhouette (no full skeleton — keep wand the focus)
+  if (state.handPts) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(40, 30, 20, 0.4)';
+    ctx.beginPath();
+    const palmPts = [0, 1, 5, 9, 13, 17];
+    for (let i = 0; i < palmPts.length; i++) {
+      const p = state.handPts[palmPts[i]];
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawArmingAura(ctx) {
+  if (!state.wandTip) return;
+  const def = SPELLS[state.armedSpell];
+  const t = millis();
+  ctx.save();
+  ctx.shadowBlur = 20; ctx.shadowColor = def.color;
+  ctx.strokeStyle = def.color; ctx.lineWidth = 2;
+
+  // orbiting energy rings
+  for (let i = 0; i < 3; i++) {
+    const phase = (t * 0.001 + i / 3) % 1;
+    const r = 12 + phase * 50;
+    ctx.globalAlpha = (1 - phase) * 0.7 * state.spellCharge;
+    ctx.beginPath();
+    ctx.arc(state.wandTip.x, state.wandTip.y, r, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  // sparks orbiting
+  ctx.fillStyle = def.color;
+  for (let i = 0; i < 8; i++) {
+    const ang = t * 0.005 + i * Math.PI / 4;
+    const r = 22 + Math.sin(t*0.01 + i) * 4;
+    const x = state.wandTip.x + Math.cos(ang) * r;
+    const y = state.wandTip.y + Math.sin(ang) * r;
+    ctx.globalAlpha = state.spellCharge;
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI*2); ctx.fill();
+  }
+
+  // flick prompt when fully charged
+  if (state.spellCharge > 0.9) {
+    ctx.shadowBlur = 10; ctx.shadowColor = '#fff';
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.8 + Math.sin(t*0.015) * 0.2;
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('FLICK', state.wandTip.x, state.wandTip.y - 50);
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+function drawShield(ctx) {
+  if (!state.shield) return;
+  const t = millis();
+  if (t > state.shield.until) { state.shield = null; return; }
+  const remaining = (state.shield.until - t) / 5000;
+  const cx = width/2, cy = height * 0.85;
+  ctx.save();
+  ctx.shadowBlur = 24; ctx.shadowColor = '#88ddff';
+  ctx.strokeStyle = `rgba(136, 221, 255, ${0.6 * remaining})`;
+  ctx.lineWidth = 3;
+  // shimmering ovoid
+  for (let i = 0; i < 3; i++) {
+    const r = 240 + i * 6 + Math.sin(t*0.005 + i) * 4;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, r * 0.9, r, 0, 0, Math.PI*2);
+    ctx.stroke();
+  }
+  // soft fill
+  const grd = ctx.createRadialGradient(cx, cy, 100, cx, cy, 280);
+  grd.addColorStop(0, 'rgba(136, 221, 255, 0)');
+  grd.addColorStop(0.7, `rgba(136, 221, 255, ${0.08 * remaining})`);
+  grd.addColorStop(1, `rgba(136, 221, 255, ${0.16 * remaining})`);
+  ctx.fillStyle = grd;
+  ctx.fillRect(cx - 280, cy - 280, 560, 560);
+  ctx.restore();
+}
+</script>
+</body>
+</html>

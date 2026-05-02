@@ -1344,6 +1344,18 @@ function updateWand() {
   // Use wrist (landmark 0) — that's where the wand emerges from the fist.
   state.lastHandPos = { x: pts[0].x, y: pts[0].y };
   state.lastHandPosAt = millis();
+  // Hand region for proximity gating: center = palm centroid, size derived
+  // from palm width (more stable than wrist-knuckle distance under rotation)
+  const palmCenter = {
+    x: (pts[0].x + pts[5].x + pts[9].x + pts[13].x + pts[17].x) / 5,
+    y: (pts[0].y + pts[5].y + pts[9].y + pts[13].y + pts[17].y) / 5
+  };
+  const palmW = Math.hypot(pts[17].x - pts[5].x, pts[17].y - pts[5].y);
+  state.lastHandRegion = {
+    center: palmCenter,
+    size: Math.max(50, palmW * 1.4),
+    atTime: millis()
+  };
 
   // Hand-local frame: forward = wrist→knuckle-center, perp = 90° CCW
   const wrist = pts[0];
@@ -2392,6 +2404,30 @@ function drawDummies(ctx) {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+// =========================================================================
+// HAND PROXIMITY GATE — physical constraint that the wand must touch the
+// hand. Any detection candidate whose nearest endpoint is farther than
+// (HAND_REACH_FACTOR × hand size) from the cached hand center is rejected
+// before tracker scoring. Eliminates the most common failure mode where
+// trackers latch onto background objects with a similar shape or color.
+// =========================================================================
+const HAND_REACH_FACTOR     = 3.5;   // wand reach in multiples of hand size
+const HAND_STALENESS_MS     = 2500;  // ignore gate after this long w/o hand
+function isWithinHandReach(point, factor) {
+  factor = factor || HAND_REACH_FACTOR;
+  if (!state.lastHandRegion) return true; // no hand cached → no gate
+  if (millis() - state.lastHandRegion.atTime > HAND_STALENESS_MS) return true;
+  const r = state.lastHandRegion.size * factor;
+  const dx = point.x - state.lastHandRegion.center.x;
+  const dy = point.y - state.lastHandRegion.center.y;
+  return (dx * dx + dy * dy) <= r * r;
+}
+// Returns true if a line segment (A→B) has any point within hand reach.
+// We only require ONE endpoint to be near the hand (the wand's base end).
+function lineHasHandContact(A, B, factor) {
+  return isWithinHandReach(A, factor) || isWithinHandReach(B, factor);
+}
+
 // Tip/base ordering — the wand tip is ALWAYS the endpoint farther from the
 // hand. Hand position is cached from MediaPipe (state.lastHandPos = wrist
 // landmark 0 in canvas coords); when MediaPipe never gave us a hand we
@@ -2468,11 +2504,26 @@ function detectWandFromColor() {
   // Luma reference helps reject pixels that match hue but not value
   const tLuma = 0.299*tr + 0.587*tg + 0.114*tb;
   const tolSq = state.wandColorTol * state.wandColorTol;
-  // Single-pass: filter pixels + accumulate stats
+  // Hand-proximity gate: restrict pixel scan to a circular region of
+  // interest around the hand. Eliminates false matches on background
+  // objects of similar color (e.g. a maroon couch elsewhere in frame).
+  const ocSx = OFF_W / width, ocSy = OFF_H / height;
+  let gateCx = -1, gateCy = -1, gateR2 = Infinity;
+  if (state.lastHandRegion && millis() - state.lastHandRegion.atTime < HAND_STALENESS_MS) {
+    gateCx = state.lastHandRegion.center.x * ocSx;
+    gateCy = state.lastHandRegion.center.y * ocSy;
+    const rOC = state.lastHandRegion.size * HAND_REACH_FACTOR * ocSx;
+    gateR2 = rOC * rOC;
+  }
+  const useGate = gateCx >= 0;
   const pts = [];
   let sumX = 0, sumY = 0;
   for (let y = 0; y < OFF_H; y += 2) {           // step 2 for perf
     for (let x = 0; x < OFF_W; x += 2) {
+      if (useGate) {
+        const ddx = x - gateCx, ddy = y - gateCy;
+        if (ddx*ddx + ddy*ddy > gateR2) continue;
+      }
       const i = (y * OFF_W + x) * 4;
       const r = data[i], g = data[i+1], b = data[i+2];
       const dr = r - tr, dg = g - tg, db = b - tb;
@@ -2564,6 +2615,13 @@ function detectWandViaHough(wristPoint /* in canvas coords, may be null */) {
       const dx = x2 - x1, dy = y2 - y1;
       const len = Math.hypot(dx, dy);
       if (len < HOUGH_MIN_LEN) continue;
+
+      // Hand-proximity gate: discard candidates with neither endpoint near
+      // the hand. Eliminates the "tracker latches onto a maroon background
+      // object" failure mode at the source.
+      const A_full = { x: x1 * sx, y: y1 * sy };
+      const B_full = { x: x2 * sx, y: y2 * sy };
+      if (!lineHasHandContact(A_full, B_full)) continue;
 
       // Proximity weight to last detection (use line midpoint distance)
       const mxL = (x1 + x2) / 2, myL = (y1 + y2) / 2;
@@ -2727,7 +2785,14 @@ function detectWandViaLock() {
     const newOcx = wx + mm.maxLoc.x + tw / 2;
     const newOcy = wy + mm.maxLoc.y + th / 2;
     const fxScale = width / OFF_W, fyScale = height / OFF_H;
-    state.lockedCenter = { x: newOcx * fxScale, y: newOcy * fyScale };
+    const candidateCenter = { x: newOcx * fxScale, y: newOcy * fyScale };
+    // Hand-proximity gate: if the locked patch wandered beyond reach, the
+    // template is no longer on the wand — fall through to other trackers.
+    if (!isWithinHandReach(candidateCenter, HAND_REACH_FACTOR)) {
+      updateLockUI();
+      return null;
+    }
+    state.lockedCenter = candidateCenter;
 
     // Refresh orientation occasionally via small Hough in tight ROI around
     // the new center. Every 4th frame keeps cost low while staying current.
@@ -3669,6 +3734,22 @@ function drawWand(ctx) {
       ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(state._knuckle.x, state._knuckle.y, 8, 0, Math.PI*2); ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  // Debug: show the hand-proximity gate circle
+  if (state.debugLandmarks && state.lastHandRegion
+      && millis() - state.lastHandRegion.atTime < HAND_STALENESS_MS) {
+    const r = state.lastHandRegion.size * HAND_REACH_FACTOR;
+    ctx.save();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255, 215, 100, 0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.arc(state.lastHandRegion.center.x, state.lastHandRegion.center.y, r, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
     ctx.restore();
   }
 

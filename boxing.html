@@ -1,0 +1,1566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Virtual Boxing Gym</title>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; }
+  canvas { display: block; }
+  video { display: none !important; }
+
+  #startBtn {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    padding: 28px 56px; font-size: 28px; font-weight: 700;
+    background: linear-gradient(135deg, #cc2222, #ff4444);
+    color: #fff; border: 3px solid #ff6666; border-radius: 16px;
+    cursor: pointer; z-index: 1000; text-transform: uppercase;
+    letter-spacing: 3px; font-family: 'Impact', 'Arial Narrow', sans-serif;
+    box-shadow: 0 0 40px rgba(255,68,68,0.5), inset 0 -4px 8px rgba(0,0,0,0.3);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  #startBtn:hover {
+    transform: translate(-50%, -50%) scale(1.06);
+    box-shadow: 0 0 60px rgba(255,68,68,0.7), inset 0 -4px 8px rgba(0,0,0,0.3);
+  }
+
+  #status {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    color: #ff4444; font-size: 18px; font-weight: 600; z-index: 100;
+    text-shadow: 0 0 12px rgba(255,68,68,0.6);
+    transition: opacity 1s ease;
+  }
+
+  #stats {
+    position: fixed; top: 16px; right: 16px; z-index: 100;
+    background: rgba(0,0,0,0.75); border: 1px solid rgba(255,68,68,0.4);
+    border-radius: 12px; padding: 14px 18px; color: #eee;
+    font-family: 'Consolas', 'Courier New', monospace; font-size: 14px;
+    min-width: 200px; backdrop-filter: blur(6px);
+    display: none;
+  }
+  #stats h3 {
+    color: #ff4444; margin-bottom: 8px; font-size: 15px;
+    letter-spacing: 2px; text-transform: uppercase;
+    border-bottom: 1px solid rgba(255,68,68,0.3); padding-bottom: 6px;
+  }
+  #stats .stat-row { display: flex; justify-content: space-between; margin: 3px 0; }
+  #stats .stat-label { color: #aaa; }
+  #stats .stat-value { color: #fff; font-weight: 600; }
+  #stats .stat-value.highlight { color: #ff4444; }
+
+  #powerBar {
+    width: 100%; height: 8px; background: rgba(255,255,255,0.1);
+    border-radius: 4px; margin-top: 6px; overflow: hidden;
+  }
+  #powerFill {
+    height: 100%; width: 0%; border-radius: 4px;
+    background: linear-gradient(90deg, #ff4444, #ffaa00);
+    transition: width 0.15s ease-out;
+  }
+
+  #comboPrompt {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    z-index: 100; display: none; text-align: center;
+  }
+  #comboPrompt .combo-label {
+    font-size: 14px; color: #aaa; text-transform: uppercase;
+    letter-spacing: 3px; margin-bottom: 6px;
+  }
+  #comboPrompt .combo-sequence {
+    font-size: 32px; font-weight: 700; letter-spacing: 4px;
+    font-family: 'Impact', 'Arial Narrow', sans-serif;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+  }
+  #comboPrompt .combo-sequence span { margin: 0 6px; }
+  .combo-done { color: #44ff44; }
+  .combo-current { color: #ffdd00; text-decoration: underline; }
+  .combo-pending { color: rgba(255,255,255,0.5); }
+
+  #comboTimer {
+    width: 200px; height: 4px; background: rgba(255,255,255,0.15);
+    border-radius: 2px; margin: 10px auto 0; overflow: hidden;
+  }
+  #comboTimerFill {
+    height: 100%; width: 100%; background: #ffdd00; border-radius: 2px;
+    transition: width 0.1s linear;
+  }
+
+  #comboResult {
+    position: fixed; bottom: 140px; left: 50%; transform: translateX(-50%);
+    z-index: 100; font-size: 36px; font-weight: 700;
+    font-family: 'Impact', 'Arial Narrow', sans-serif;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.7);
+    opacity: 0; transition: opacity 0.4s;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<button id="startBtn">Step Into the Ring</button>
+<div id="status">Initializing...</div>
+<div id="stats">
+  <h3>Fight Stats</h3>
+  <div class="stat-row"><span class="stat-label">Time</span><span class="stat-value" id="statTime">00:00</span></div>
+  <div class="stat-row"><span class="stat-label">Total</span><span class="stat-value highlight" id="statTotal">0</span></div>
+  <div class="stat-row"><span class="stat-label">Jabs</span><span class="stat-value" id="statJabs">0</span></div>
+  <div class="stat-row"><span class="stat-label">Crosses</span><span class="stat-value" id="statCrosses">0</span></div>
+  <div class="stat-row"><span class="stat-label">Hooks</span><span class="stat-value" id="statHooks">0</span></div>
+  <div class="stat-row"><span class="stat-label">Uppercuts</span><span class="stat-value" id="statUppercuts">0</span></div>
+  <div class="stat-row"><span class="stat-label">Combo</span><span class="stat-value" id="statCombo">0</span></div>
+  <div class="stat-row"><span class="stat-label">Best</span><span class="stat-value" id="statBest">0</span></div>
+  <div class="stat-row"><span class="stat-label">Power</span></div>
+  <div id="powerBar"><div id="powerFill"></div></div>
+</div>
+<div id="comboPrompt">
+  <div class="combo-label">COMBO</div>
+  <div class="combo-sequence" id="comboSequence"></div>
+  <div id="comboTimer"><div id="comboTimerFill"></div></div>
+</div>
+<div id="comboResult"></div>
+
+<script>
+// =========================================================================
+//  VIRTUAL BOXING GYM — Single-file implementation
+// =========================================================================
+
+// --- State ---
+const state = {
+  videoEl: null,
+  camReady: false,
+  handsResults: null,
+  poseResults: null,
+  body: {
+    shoulderL: null, shoulderR: null, nose: null,
+    shoulderMid: null, shoulderWidth: 200, valid: false,
+    filters: {
+      shoulderLX: { val: null, dx: 0, lastT: 0 },
+      shoulderLY: { val: null, dx: 0, lastT: 0 },
+      shoulderRX: { val: null, dx: 0, lastT: 0 },
+      shoulderRY: { val: null, dx: 0, lastT: 0 },
+      noseX: { val: null, dx: 0, lastT: 0 },
+      noseY: { val: null, dx: 0, lastT: 0 },
+    }
+  },
+  hands: {
+    left: {
+      pos: null, fist: false, velocity: { x: 0, y: 0 }, speed: 0,
+      history: [], lastPunch: 0, handScale: 0, scaleVel: 0,
+      inSpeedBag: false, inHeavyBag: false, lastContactTime: 0,
+      filters: {
+        x: { val: null, dx: 0, lastT: 0 },
+        y: { val: null, dx: 0, lastT: 0 },
+        scale: { val: null, dx: 0, lastT: 0 }
+      }
+    },
+    right: {
+      pos: null, fist: false, velocity: { x: 0, y: 0 }, speed: 0,
+      history: [], lastPunch: 0, handScale: 0, scaleVel: 0,
+      inSpeedBag: false, inHeavyBag: false, lastContactTime: 0,
+      filters: {
+        x: { val: null, dx: 0, lastT: 0 },
+        y: { val: null, dx: 0, lastT: 0 },
+        scale: { val: null, dx: 0, lastT: 0 }
+      }
+    }
+  },
+  speedBag: { angle: 0, angVel: 0, mountX: 0, mountY: 0, radius: 30, armLength: 60 },
+  heavyBag: { angle: 0, angVel: 0, mountX: 0, mountY: 0, length: 200, bagWidth: 50, chainLength: 40 },
+  stats: {
+    total: 0, jabs: 0, crosses: 0, hooks: 0, uppercuts: 0,
+    lastPower: 0, comboStreak: 0, bestStreak: 0, sessionStart: 0
+  },
+  combo: {
+    active: false, sequence: [], currentIdx: 0,
+    startTime: 0, timeLimit: 5000, score: 0,
+    nextComboTime: 0
+  },
+  shake: null,
+  flash: null,
+  particles: [],
+  lastFrameTime: 0,
+  statsUpdateTime: 0,
+  initialized: false
+};
+
+const MAX_PARTICLES = 200;
+const PUNCH_COOLDOWN = 300;
+const HAND_HISTORY_SIZE = 5;
+
+// =========================================================================
+//  ONE EURO FILTER (from wand.html)
+// =========================================================================
+const ONE_EURO_MIN_CUTOFF = 0.8;
+const ONE_EURO_BETA = 0.07;
+const ONE_EURO_DCUTOFF = 1.0;
+
+function oneEuroAlpha(cutoff, dt) {
+  const tau = 1.0 / (2 * Math.PI * cutoff);
+  return 1.0 / (1.0 + tau / dt);
+}
+
+function oneEuro(filt, value, timeMs,
+                 minCutoff = ONE_EURO_MIN_CUTOFF,
+                 beta = ONE_EURO_BETA,
+                 dCutoff = ONE_EURO_DCUTOFF) {
+  if (filt.val === null) {
+    filt.val = value; filt.dx = 0; filt.lastT = timeMs;
+    return value;
+  }
+  const dt = (timeMs - filt.lastT) / 1000.0;
+  if (dt <= 0) return filt.val;
+  const dx = (value - filt.val) / dt;
+  const dxAlpha = oneEuroAlpha(dCutoff, dt);
+  filt.dx = filt.dx + dxAlpha * (dx - filt.dx);
+  const cutoff = minCutoff + beta * Math.abs(filt.dx);
+  const valAlpha = oneEuroAlpha(cutoff, dt);
+  filt.val = filt.val + valAlpha * (value - filt.val);
+  filt.lastT = timeMs;
+  return filt.val;
+}
+
+// Body filter params: higher minCutoff, lower beta for stability
+const BODY_MIN_CUTOFF = 1.5;
+const BODY_BETA = 0.03;
+
+// =========================================================================
+//  AUDIO (from wand.html pattern)
+// =========================================================================
+let _audioCtx = null;
+function getAudioCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_audioCtx.state === 'suspended') _audioCtx.resume();
+  return _audioCtx;
+}
+
+function playTone({ type = 'sine', startFreq, endFreq, duration = 0.3, volume = 0.3, delay = 0 }) {
+  const ctx = getAudioCtx();
+  const t0 = ctx.currentTime + delay;
+  const osc = ctx.createOscillator();
+  osc.type = type;
+  osc.frequency.setValueAtTime(startFreq, t0);
+  if (endFreq) osc.frequency.exponentialRampToValueAtTime(Math.max(0.01, endFreq), t0 + duration);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0, t0);
+  gain.gain.linearRampToValueAtTime(volume, t0 + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+  osc.connect(gain); gain.connect(ctx.destination);
+  osc.start(t0); osc.stop(t0 + duration + 0.05);
+}
+
+function playNoise({ filterType = 'bandpass', filterFreq = 1000, Q = 1, duration = 0.4, volume = 0.3, delay = 0 }) {
+  const ctx = getAudioCtx();
+  const t0 = ctx.currentTime + delay;
+  const len = Math.max(1, Math.floor(ctx.sampleRate * duration));
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = filterType; filt.frequency.value = filterFreq; filt.Q.value = Q;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(volume, t0);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+  src.connect(filt); filt.connect(gain); gain.connect(ctx.destination);
+  src.start(t0);
+}
+
+function playSpeedBagSound(vol = 0.25) {
+  playNoise({ filterType: 'bandpass', filterFreq: 3000, Q: 2, duration: 0.06, volume: vol });
+  playTone({ type: 'sine', startFreq: 800, endFreq: 400, duration: 0.06, volume: vol * 0.6 });
+}
+
+function playHeavyBagSound(power) {
+  const vol = 0.35 + (power / 100) * 0.55;
+  playTone({ type: 'sine', startFreq: 90, endFreq: 35, duration: 0.3, volume: vol });
+  playNoise({ filterType: 'lowpass', filterFreq: 500, Q: 0.7, duration: 0.25, volume: vol * 0.7 });
+  playNoise({ filterType: 'bandpass', filterFreq: 1200, Q: 3, duration: 0.1, volume: vol * 0.5, delay: 0.01 });
+}
+
+function playComboComplete() {
+  playTone({ type: 'sine', startFreq: 523, duration: 0.12, volume: 0.2, delay: 0 });
+  playTone({ type: 'sine', startFreq: 659, duration: 0.12, volume: 0.2, delay: 0.12 });
+  playTone({ type: 'sine', startFreq: 784, duration: 0.2, volume: 0.25, delay: 0.24 });
+}
+
+function playComboFailed() {
+  playTone({ type: 'sawtooth', startFreq: 300, endFreq: 150, duration: 0.3, volume: 0.15 });
+}
+
+// =========================================================================
+//  SCREEN SHAKE + FLASH (from wand.html)
+// =========================================================================
+function triggerShake(intensity, duration) {
+  state.shake = { intensity, duration, until: millis() + duration, started: millis() };
+}
+
+function triggerFlash(color, duration = 180, maxAlpha = 0.55) {
+  state.flash = { color, duration, until: millis() + duration, maxAlpha };
+}
+
+function applyShake(ctx) {
+  if (!state.shake || millis() > state.shake.until) return;
+  const remaining = (state.shake.until - millis()) / state.shake.duration;
+  const k = state.shake.intensity * remaining;
+  const sx = (Math.random() - 0.5) * k * 2;
+  const sy = (Math.random() - 0.5) * k * 2;
+  ctx.translate(sx, sy);
+}
+
+function drawFlash(ctx) {
+  if (!state.flash || millis() > state.flash.until) return;
+  const remaining = (state.flash.until - millis()) / state.flash.duration;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.globalAlpha = remaining * state.flash.maxAlpha;
+  ctx.fillStyle = state.flash.color;
+  ctx.fillRect(0, 0, width, height);
+  ctx.restore();
+}
+
+// =========================================================================
+//  PARTICLES (from index.html pattern)
+// =========================================================================
+function spawnImpactParticles(x, y, color, count = 16) {
+  for (let i = 0; i < count; i++) {
+    if (state.particles.length >= MAX_PARTICLES) state.particles.shift();
+    const angle = (Math.PI * 2) * (i / count) + Math.random() * 0.4;
+    const speed = 2 + Math.random() * 6;
+    state.particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1.0,
+      decay: 0.015 + Math.random() * 0.025,
+      color,
+      size: 2 + Math.random() * 4
+    });
+  }
+}
+
+function updateAndDrawParticles(ctx) {
+  for (let i = state.particles.length - 1; i >= 0; i--) {
+    const p = state.particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.12;
+    p.vx *= 0.97;
+    p.vy *= 0.97;
+    p.life -= p.decay;
+    if (p.life <= 0) { state.particles.splice(i, 1); continue; }
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// =========================================================================
+//  FIST DETECTION
+// =========================================================================
+function isFist(landmarks) {
+  // landmarks: array of 21 hand landmarks (x, y, z in normalized coords)
+  // Palm center approximation: average of wrist(0) and middle finger MCP(9)
+  const palmX = (landmarks[0].x + landmarks[9].x) / 2;
+  const palmY = (landmarks[0].y + landmarks[9].y) / 2;
+
+  // Check fingers: index(8/6), middle(12/10), ring(16/14), pinky(20/18)
+  // tip vs PIP — if tip is closer to palm than PIP, finger is curled
+  const fingers = [
+    { tip: 8, pip: 6 },
+    { tip: 12, pip: 10 },
+    { tip: 16, pip: 14 },
+    { tip: 20, pip: 18 }
+  ];
+
+  let curled = 0;
+  for (const f of fingers) {
+    const tipDist = Math.hypot(landmarks[f.tip].x - palmX, landmarks[f.tip].y - palmY);
+    const pipDist = Math.hypot(landmarks[f.pip].x - palmX, landmarks[f.pip].y - palmY);
+    if (tipDist < pipDist) curled++;
+  }
+
+  return curled >= 3;
+}
+
+// =========================================================================
+//  PUNCH CLASSIFICATION
+// =========================================================================
+function classifyPunch(hand, handLabel, shoulderWidth) {
+  const vx = hand.velocity.x;
+  const vy = hand.velocity.y;
+  const speed = hand.speed;
+
+  const minSpeed = shoulderWidth * 2.5;
+  if (speed < minSpeed) return null;
+
+  const now = millis();
+  if (now - hand.lastPunch < PUNCH_COOLDOWN) return null;
+  if (!hand.fist) return null;
+
+  // scaleVel > 0 means hand is getting bigger = moving toward camera = forward punch.
+  // This is the key signal that distinguishes jab/cross from hook.
+  const forwardMotion = hand.scaleVel > 0;
+  // Normalize scale velocity relative to current hand scale for comparison
+  const scaleRatio = hand.handScale > 10 ? hand.scaleVel / hand.handScale : 0;
+
+  const absVx = Math.abs(vx);
+  const absVy = Math.abs(vy);
+
+  let punchType;
+
+  // Uppercut: strong upward movement (vy is negative in screen coords = up)
+  if (vy < 0 && absVy > absVx * 1.2 && absVy > speed * 0.5) {
+    punchType = 'uppercut';
+  }
+  // Hook: strong lateral movement WITHOUT forward motion toward camera.
+  // The hand sweeps sideways but doesn't grow in apparent size.
+  else if (absVx > absVy * 1.5 && scaleRatio < 0.8) {
+    punchType = 'hook';
+  }
+  // Jab / Cross: hand moving toward camera (scale growing) or relatively
+  // straight trajectory. Distinguish lead vs rear hand.
+  // MediaPipe "Right" (pre-mirror) = user's left hand = lead in orthodox = jab
+  // MediaPipe "Left" (pre-mirror) = user's right hand = rear in orthodox = cross
+  else {
+    if (handLabel === 'Right') {
+      punchType = 'jab';
+    } else {
+      punchType = 'cross';
+    }
+  }
+
+  const power = Math.min(100, (speed / (shoulderWidth * 8)) * 100);
+  hand.lastPunch = now;
+
+  return { type: punchType, power, handLabel };
+}
+
+// =========================================================================
+//  BAG HIT DETECTION
+// =========================================================================
+function getSpeedBagPos() {
+  const sb = state.speedBag;
+  const bx = sb.mountX + Math.sin(sb.angle) * sb.armLength;
+  const by = sb.mountY + Math.cos(sb.angle) * sb.armLength;
+  return { x: bx, y: by };
+}
+
+function getHeavyBagPos() {
+  const hb = state.heavyBag;
+  const totalLen = hb.chainLength + hb.length * 0.5;
+  const bx = hb.mountX + Math.sin(hb.angle) * totalLen;
+  const by = hb.mountY + Math.cos(hb.angle) * totalLen;
+  return { x: bx, y: by };
+}
+
+function hitTestSpeedBag(px, py) {
+  const bp = getSpeedBagPos();
+  const dist = Math.hypot(px - bp.x, py - bp.y);
+  return dist < state.speedBag.radius * 2.5;
+}
+
+function hitTestHeavyBag(px, py) {
+  const hb = state.heavyBag;
+  const bp = getHeavyBagPos();
+  const dx = px - bp.x;
+  const dy = py - bp.y;
+  return Math.abs(dx) < hb.bagWidth * 1.2 && Math.abs(dy) < hb.length * 0.6;
+}
+
+// =========================================================================
+//  BAG PHYSICS
+// =========================================================================
+function updateSpeedBag(dt) {
+  const sb = state.speedBag;
+  // Damped harmonic: angle'' = -k*angle - c*angVel
+  const k = 400;
+  const c = 3.5;
+  const angAccel = -k * sb.angle - c * sb.angVel;
+  sb.angVel += angAccel * dt;
+  sb.angle += sb.angVel * dt;
+  // Dampen tiny oscillations
+  if (Math.abs(sb.angle) < 0.001 && Math.abs(sb.angVel) < 0.01) {
+    sb.angle = 0; sb.angVel = 0;
+  }
+}
+
+function updateHeavyBag(dt) {
+  const hb = state.heavyBag;
+  // Pendulum: angle'' = -(g/L)*sin(angle) - c*angVel
+  const gOverL = 600 / hb.length;
+  const c = 1.2;
+  const angAccel = -gOverL * Math.sin(hb.angle) - c * hb.angVel;
+  hb.angVel += angAccel * dt;
+  hb.angle += hb.angVel * dt;
+  if (Math.abs(hb.angle) < 0.0005 && Math.abs(hb.angVel) < 0.005) {
+    hb.angle = 0; hb.angVel = 0;
+  }
+}
+
+function applySpeedBagHit(handX) {
+  const sb = state.speedBag;
+  const direction = handX < sb.mountX ? 1 : -1;
+  sb.angVel += direction * 8;
+}
+
+function applyHeavyBagHit(handX, power) {
+  const hb = state.heavyBag;
+  const direction = handX < hb.mountX ? 1 : -1;
+  hb.angVel += direction * (1.5 + power * 0.03);
+}
+
+// =========================================================================
+//  COMBO SYSTEM
+// =========================================================================
+const COMBO_TEMPLATES = [
+  ['jab', 'jab'],
+  ['jab', 'cross'],
+  ['jab', 'jab', 'cross'],
+  ['jab', 'cross', 'hook'],
+  ['jab', 'cross', 'jab', 'cross'],
+  ['jab', 'jab', 'cross', 'hook'],
+  ['cross', 'hook', 'uppercut'],
+  ['jab', 'cross', 'hook', 'uppercut'],
+  ['jab', 'jab', 'cross', 'hook', 'cross'],
+  ['jab', 'cross', 'hook', 'cross', 'hook', 'uppercut']
+];
+
+function startCombo() {
+  const template = COMBO_TEMPLATES[Math.floor(Math.random() * COMBO_TEMPLATES.length)];
+  state.combo.active = true;
+  state.combo.sequence = template;
+  state.combo.currentIdx = 0;
+  state.combo.startTime = millis();
+  state.combo.timeLimit = 3000 + template.length * 1200;
+  updateComboDisplay();
+  document.getElementById('comboPrompt').style.display = 'block';
+}
+
+function advanceCombo(punchType) {
+  const c = state.combo;
+  if (!c.active) return;
+  if (punchType === c.sequence[c.currentIdx]) {
+    c.currentIdx++;
+    updateComboDisplay();
+    if (c.currentIdx >= c.sequence.length) {
+      // Combo completed
+      c.active = false;
+      c.score++;
+      state.stats.comboStreak++;
+      if (state.stats.comboStreak > state.stats.bestStreak) {
+        state.stats.bestStreak = state.stats.comboStreak;
+      }
+      playComboComplete();
+      showComboResult('COMBO!', '#44ff44');
+      setTimeout(() => {
+        document.getElementById('comboPrompt').style.display = 'none';
+      }, 600);
+    }
+  } else {
+    // Wrong punch — fail
+    failCombo();
+  }
+}
+
+function failCombo() {
+  state.combo.active = false;
+  state.stats.comboStreak = 0;
+  playComboFailed();
+  showComboResult('MISS', '#ff4444');
+  setTimeout(() => {
+    document.getElementById('comboPrompt').style.display = 'none';
+  }, 600);
+}
+
+function updateComboDisplay() {
+  const c = state.combo;
+  const container = document.getElementById('comboSequence');
+  let html = '';
+  for (let i = 0; i < c.sequence.length; i++) {
+    let cls = 'combo-pending';
+    if (i < c.currentIdx) cls = 'combo-done';
+    else if (i === c.currentIdx) cls = 'combo-current';
+    html += `<span class="${cls}">${c.sequence[i].toUpperCase()}</span>`;
+    if (i < c.sequence.length - 1) html += ' <span style="color:rgba(255,255,255,0.3)">-</span> ';
+  }
+  container.innerHTML = html;
+}
+
+function updateComboTimer() {
+  const c = state.combo;
+  if (!c.active) return;
+  const elapsed = millis() - c.startTime;
+  const remaining = Math.max(0, 1 - elapsed / c.timeLimit);
+  document.getElementById('comboTimerFill').style.width = (remaining * 100) + '%';
+  if (elapsed >= c.timeLimit) {
+    failCombo();
+  }
+}
+
+function showComboResult(text, color) {
+  const el = document.getElementById('comboResult');
+  el.textContent = text;
+  el.style.color = color;
+  el.style.opacity = '1';
+  setTimeout(() => { el.style.opacity = '0'; }, 1200);
+}
+
+// =========================================================================
+//  STATS HUD
+// =========================================================================
+function updateStatsDisplay() {
+  const now = millis();
+  if (now - state.statsUpdateTime < 250) return;
+  state.statsUpdateTime = now;
+
+  const elapsed = Math.floor((now - state.stats.sessionStart) / 1000);
+  const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+  const secs = String(elapsed % 60).padStart(2, '0');
+  document.getElementById('statTime').textContent = `${mins}:${secs}`;
+  document.getElementById('statTotal').textContent = state.stats.total;
+  document.getElementById('statJabs').textContent = state.stats.jabs;
+  document.getElementById('statCrosses').textContent = state.stats.crosses;
+  document.getElementById('statHooks').textContent = state.stats.hooks;
+  document.getElementById('statUppercuts').textContent = state.stats.uppercuts;
+  document.getElementById('statCombo').textContent = state.stats.comboStreak;
+  document.getElementById('statBest').textContent = state.stats.bestStreak;
+  document.getElementById('powerFill').style.width = state.stats.lastPower + '%';
+}
+
+// =========================================================================
+//  STATUS HELPER
+// =========================================================================
+function setStatus(msg) {
+  const el = document.getElementById('status');
+  if (el) { el.textContent = msg; el.style.opacity = '1'; }
+}
+
+// =========================================================================
+//  MEDIAPIPE INIT
+// =========================================================================
+function initMediaPipe() {
+  const videoEl = document.createElement('video');
+  videoEl.setAttribute('playsinline', '');
+  videoEl.muted = true;
+  document.body.appendChild(videoEl);
+  state.videoEl = videoEl;
+
+  setStatus('Loading hand tracking...');
+
+  const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.4
+  });
+  hands.onResults((results) => {
+    state.handsResults = results;
+  });
+
+  const pose = new Pose({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+  });
+  pose.setOptions({
+    modelComplexity: 1,
+    smoothLandmarks: true,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  });
+  pose.onResults((results) => {
+    state.poseResults = results;
+    if (!state.camReady) {
+      state.camReady = true;
+      state.stats.sessionStart = millis();
+      state.combo.nextComboTime = millis() + 18000;
+      setStatus('Tracking active - throw some punches!');
+      document.getElementById('stats').style.display = 'block';
+      setTimeout(() => {
+        const el = document.getElementById('status');
+        if (el) { el.style.opacity = '0'; }
+      }, 3000);
+    }
+  });
+
+  // Frame counter for adaptive model switching
+  let frameCount = 0;
+  let lowFpsCount = 0;
+  let alternateModels = false;
+  let lastFpsCheck = performance.now();
+  let fpsFrames = 0;
+
+  const camera = new Camera(videoEl, {
+    onFrame: async () => {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - lastFpsCheck > 1000) {
+        const fps = fpsFrames / ((now - lastFpsCheck) / 1000);
+        fpsFrames = 0;
+        lastFpsCheck = now;
+        if (fps < 18) {
+          lowFpsCount++;
+          if (lowFpsCount > 3 && !alternateModels) {
+            alternateModels = true;
+            console.log('Switching to alternating model mode for performance');
+          }
+        } else {
+          lowFpsCount = Math.max(0, lowFpsCount - 1);
+        }
+      }
+
+      if (alternateModels) {
+        // Alternate: hands every frame, pose every other frame
+        await hands.send({ image: videoEl });
+        if (frameCount % 2 === 0) {
+          await pose.send({ image: videoEl });
+        }
+      } else {
+        await hands.send({ image: videoEl });
+        await pose.send({ image: videoEl });
+      }
+      frameCount++;
+    },
+    width: 1280,
+    height: 720
+  });
+
+  camera.start().catch(err => {
+    console.error(err);
+    setStatus('Camera error: ' + err.message);
+  });
+}
+
+// =========================================================================
+//  PROCESS BODY (Pose landmarks)
+// =========================================================================
+function processBody(t) {
+  if (!state.poseResults || !state.poseResults.poseLandmarks) {
+    state.body.valid = false;
+    return;
+  }
+  const lm = state.poseResults.poseLandmarks;
+  // Shoulders: 11 (left), 12 (right); Nose: 0
+  const sl = lm[11]; const sr = lm[12]; const nose = lm[0];
+  if (!sl || !sr || !nose) { state.body.valid = false; return; }
+  if (sl.visibility < 0.3 || sr.visibility < 0.3) { state.body.valid = false; return; }
+
+  // Mirror X and scale to canvas
+  const slX = oneEuro(state.body.filters.shoulderLX, (1 - sl.x) * width, t, BODY_MIN_CUTOFF, BODY_BETA);
+  const slY = oneEuro(state.body.filters.shoulderLY, sl.y * height, t, BODY_MIN_CUTOFF, BODY_BETA);
+  const srX = oneEuro(state.body.filters.shoulderRX, (1 - sr.x) * width, t, BODY_MIN_CUTOFF, BODY_BETA);
+  const srY = oneEuro(state.body.filters.shoulderRY, sr.y * height, t, BODY_MIN_CUTOFF, BODY_BETA);
+  const noseX = oneEuro(state.body.filters.noseX, (1 - nose.x) * width, t, BODY_MIN_CUTOFF, BODY_BETA);
+  const noseY = oneEuro(state.body.filters.noseY, nose.y * height, t, BODY_MIN_CUTOFF, BODY_BETA);
+
+  state.body.shoulderL = { x: slX, y: slY };
+  state.body.shoulderR = { x: srX, y: srY };
+  state.body.nose = { x: noseX, y: noseY };
+  state.body.shoulderMid = { x: (slX + srX) / 2, y: (slY + srY) / 2 };
+  state.body.shoulderWidth = Math.hypot(srX - slX, srY - slY);
+  state.body.valid = state.body.shoulderWidth > 30;
+}
+
+// =========================================================================
+//  PROCESS HANDS
+// =========================================================================
+function processHands(t) {
+  // Reset hand state each frame
+  state.hands.left.pos = null;
+  state.hands.right.pos = null;
+  state.hands.left.fist = false;
+  state.hands.right.fist = false;
+  state.hands.left.landmarks = null;
+  state.hands.right.landmarks = null;
+
+  if (!state.handsResults || !state.handsResults.multiHandLandmarks) return;
+
+  const results = state.handsResults;
+  for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+    const landmarks = results.multiHandLandmarks[i];
+    const classification = results.multiHandedness[i];
+    const label = classification.label; // "Left" or "Right" (from MediaPipe's perspective)
+
+    // Use wrist (0) for position
+    const rawX = (1 - landmarks[0].x) * width;  // Mirror X
+    const rawY = landmarks[0].y * height;
+
+    // Determine which hand state to use
+    // MediaPipe "Left" = camera-left = user's right hand (after mirror)
+    // MediaPipe "Right" = camera-right = user's left hand (after mirror)
+    const hand = label === 'Left' ? state.hands.right : state.hands.left;
+
+    const fx = oneEuro(hand.filters.x, rawX, t);
+    const fy = oneEuro(hand.filters.y, rawY, t);
+    hand.pos = { x: fx, y: fy };
+    hand.fist = isFist(landmarks);
+    // Store key landmark positions in canvas coords for glove rendering
+    hand.landmarks = landmarks.map(lm => ({
+      x: (1 - lm.x) * width,
+      y: lm.y * height
+    }));
+
+    // Hand scale: distance from wrist(0) to middle MCP(9) in pixels.
+    // When the hand moves toward the camera it appears larger.
+    const rawScale = Math.hypot(
+      (landmarks[0].x - landmarks[9].x) * width,
+      (landmarks[0].y - landmarks[9].y) * height
+    );
+    hand.handScale = oneEuro(hand.filters.scale, rawScale, t);
+
+    // Update history for velocity calculation (includes scale for Z-proxy)
+    hand.history.push({ x: fx, y: fy, scale: hand.handScale, t });
+    if (hand.history.length > HAND_HISTORY_SIZE) hand.history.shift();
+
+    // Compute velocity from history
+    if (hand.history.length >= 2) {
+      const oldest = hand.history[0];
+      const newest = hand.history[hand.history.length - 1];
+      const dt = (newest.t - oldest.t) / 1000;
+      if (dt > 0) {
+        hand.velocity.x = (newest.x - oldest.x) / dt;
+        hand.velocity.y = (newest.y - oldest.y) / dt;
+        hand.speed = Math.hypot(hand.velocity.x, hand.velocity.y);
+        // Scale velocity: positive = hand getting bigger = moving toward camera
+        hand.scaleVel = (newest.scale - oldest.scale) / dt;
+      }
+    }
+  }
+}
+
+// =========================================================================
+//  DETECT CONTACTS AND PUNCHES
+// =========================================================================
+const CONTACT_COOLDOWN = 100;
+
+function detectPunches() {
+  if (!state.body.valid) return;
+  const sw = state.body.shoulderWidth;
+  const now = millis();
+
+  const handEntries = [
+    { hand: state.hands.left, label: 'Right' },
+    { hand: state.hands.right, label: 'Left' }
+  ];
+
+  for (const { hand, label } of handEntries) {
+    if (!hand.pos) {
+      hand.inSpeedBag = false;
+      hand.inHeavyBag = false;
+      continue;
+    }
+
+    const hx = hand.pos.x;
+    const hy = hand.pos.y;
+    const intensity = Math.min(1, hand.speed / (sw * 5));
+
+    // --- Contact detection (always runs, triggers sound on entry) ---
+    const touchingSB = hitTestSpeedBag(hx, hy);
+    const touchingHB = hitTestHeavyBag(hx, hy);
+
+    if (touchingSB && !hand.inSpeedBag && now - hand.lastContactTime > CONTACT_COOLDOWN) {
+      hand.lastContactTime = now;
+      const vol = 0.1 + intensity * 0.3;
+      playSpeedBagSound(vol);
+      applySpeedBagHit(hx);
+      const bp = getSpeedBagPos();
+      spawnImpactParticles(bp.x, bp.y, '#ffcc44', 6 + Math.floor(intensity * 10));
+    }
+
+    if (touchingHB && !hand.inHeavyBag && now - hand.lastContactTime > CONTACT_COOLDOWN) {
+      hand.lastContactTime = now;
+      const power = intensity * 100;
+      playHeavyBagSound(power);
+      applyHeavyBagHit(hx, power);
+      const bp = getHeavyBagPos();
+      spawnImpactParticles(bp.x, bp.y, '#ff6644', 8 + Math.floor(intensity * 14));
+      if (intensity > 0.3) {
+        triggerShake(2 + intensity * 12, 150 + intensity * 250);
+        triggerFlash('#ff4400', 100, 0.1 + intensity * 0.25);
+      }
+    }
+
+    hand.inSpeedBag = touchingSB;
+    hand.inHeavyBag = touchingHB;
+
+    // --- Punch classification (for stats + combos only) ---
+    const punch = classifyPunch(hand, label, sw);
+    if (!punch) continue;
+
+    state.stats.total++;
+    state.stats.lastPower = punch.power;
+    switch (punch.type) {
+      case 'jab': state.stats.jabs++; break;
+      case 'cross': state.stats.crosses++; break;
+      case 'hook': state.stats.hooks++; break;
+      case 'uppercut': state.stats.uppercuts++; break;
+    }
+
+    if (state.combo.active) {
+      advanceCombo(punch.type);
+    }
+  }
+}
+
+// =========================================================================
+//  UPDATE EQUIPMENT POSITIONS
+// =========================================================================
+function updateEquipmentPositions() {
+  if (!state.body.valid) return;
+  const sw = state.body.shoulderWidth;
+  const nose = state.body.nose;
+  const mid = state.body.shoulderMid;
+
+  // Speed bag: near head, offset to dominant side
+  state.speedBag.mountX = nose.x + sw * 0.3;
+  state.speedBag.mountY = nose.y - sw * 0.9;
+  state.speedBag.radius = sw * 0.12;
+  state.speedBag.armLength = sw * 0.25;
+
+  // Heavy bag: offset to non-dominant side so it doesn't sit on the body
+  state.heavyBag.mountX = nose.x - sw * 0.5;
+  state.heavyBag.mountY = mid.y - sw * 0.3;
+  state.heavyBag.length = sw * 0.9;
+  state.heavyBag.bagWidth = sw * 0.22;
+  state.heavyBag.chainLength = sw * 0.18;
+}
+
+// =========================================================================
+//  RENDERING — CAMERA BACKGROUND
+// =========================================================================
+function drawBackground(ctx) {
+  if (state.videoEl && state.videoEl.readyState >= 2) {
+    ctx.save();
+    ctx.translate(width, 0);
+    ctx.scale(-1, 1);
+    const vw = state.videoEl.videoWidth || 1280;
+    const vh = state.videoEl.videoHeight || 720;
+    const canvasAspect = width / height;
+    const videoAspect = vw / vh;
+    let dw, dh, dx, dy;
+    if (canvasAspect > videoAspect) {
+      dw = width; dh = width / videoAspect; dx = 0; dy = (height - dh) / 2;
+    } else {
+      dh = height; dw = height * videoAspect; dx = (width - dw) / 2; dy = 0;
+    }
+    ctx.drawImage(state.videoEl, dx, dy, dw, dh);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, width, height);
+  }
+  // Slight darkening overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  ctx.fillRect(0, 0, width, height);
+}
+
+// =========================================================================
+//  RENDERING — SPEED BAG
+// =========================================================================
+function drawSpeedBag(ctx) {
+  const sb = state.speedBag;
+  const mx = sb.mountX;
+  const my = sb.mountY;
+  const angle = sb.angle;
+  const r = sb.radius;
+
+  // --- Ceiling-mounted platform ---
+  ctx.save();
+  // Platform board (dark wood)
+  const platW = r * 5, platH = r * 0.8;
+  const woodGrad = ctx.createLinearGradient(mx - platW/2, my - platH, mx + platW/2, my);
+  woodGrad.addColorStop(0, '#3d2b1f');
+  woodGrad.addColorStop(0.3, '#5c3d2e');
+  woodGrad.addColorStop(0.6, '#4a3020');
+  woodGrad.addColorStop(1, '#2e1e14');
+  ctx.fillStyle = woodGrad;
+  ctx.beginPath();
+  ctx.roundRect(mx - platW/2, my - platH, platW, platH, 3);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Board edge highlight
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath();
+  ctx.moveTo(mx - platW/2 + 2, my - platH + 1);
+  ctx.lineTo(mx + platW/2 - 2, my - platH + 1);
+  ctx.stroke();
+
+  // --- Swivel hook (metal) ---
+  const hookY = my;
+  const metalGrad = ctx.createLinearGradient(mx - 4, hookY, mx + 4, hookY + r * 0.6);
+  metalGrad.addColorStop(0, '#c0c0c0');
+  metalGrad.addColorStop(0.4, '#e8e8e8');
+  metalGrad.addColorStop(0.7, '#a0a0a0');
+  metalGrad.addColorStop(1, '#808080');
+  ctx.fillStyle = metalGrad;
+  ctx.fillRect(mx - 3, hookY, 6, r * 0.5);
+  // Swivel joint circle
+  ctx.fillStyle = '#b0b0b0';
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(mx, hookY + r * 0.5, 5, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+
+  // --- Swivel arm (angled with bag) ---
+  const armTop = { x: mx, y: hookY + r * 0.55 };
+  const bx = mx + Math.sin(angle) * sb.armLength;
+  const by = my + Math.cos(angle) * sb.armLength + r * 0.5;
+
+  ctx.strokeStyle = '#999';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(armTop.x, armTop.y);
+  ctx.lineTo(bx, by - r * 0.9);
+  ctx.stroke();
+  // Arm highlight
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(armTop.x - 1, armTop.y);
+  ctx.lineTo(bx - 1, by - r * 0.9);
+  ctx.stroke();
+
+  // --- Speed bag body ---
+  ctx.save();
+  ctx.translate(bx, by);
+  ctx.rotate(angle * 0.6);
+
+  // Shadow underneath
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(3, r * 0.6, r * 0.9, r * 0.35, 0.1, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Main body — proper speed bag teardrop (wider at top, pointy at bottom)
+  const bagGrad = ctx.createLinearGradient(-r, -r, r * 0.8, r * 1.2);
+  bagGrad.addColorStop(0, '#b85c38');
+  bagGrad.addColorStop(0.25, '#d4764e');
+  bagGrad.addColorStop(0.5, '#c46840');
+  bagGrad.addColorStop(0.75, '#9c4828');
+  bagGrad.addColorStop(1, '#6e2e16');
+  ctx.fillStyle = bagGrad;
+  ctx.beginPath();
+  // Top (flat, attached to swivel)
+  ctx.moveTo(-r * 0.25, -r * 1.1);
+  ctx.lineTo(r * 0.25, -r * 1.1);
+  // Right curve bulging out
+  ctx.bezierCurveTo(r * 0.9, -r * 0.9, r * 1.1, -r * 0.2, r * 0.95, r * 0.1);
+  // Taper to bottom point
+  ctx.bezierCurveTo(r * 0.7, r * 0.7, r * 0.15, r * 1.3, 0, r * 1.4);
+  // Mirror left side
+  ctx.bezierCurveTo(-r * 0.15, r * 1.3, -r * 0.7, r * 0.7, -r * 0.95, r * 0.1);
+  ctx.bezierCurveTo(-r * 1.1, -r * 0.2, -r * 0.9, -r * 0.9, -r * 0.25, -r * 1.1);
+  ctx.closePath();
+  ctx.fill();
+
+  // Seam lines (4 panels)
+  ctx.strokeStyle = 'rgba(80, 30, 10, 0.6)';
+  ctx.lineWidth = 1.2;
+  // Vertical center seam
+  ctx.beginPath();
+  ctx.moveTo(0, -r * 1.05);
+  ctx.quadraticCurveTo(0, r * 0.3, 0, r * 1.35);
+  ctx.stroke();
+  // Horizontal equator seam
+  ctx.beginPath();
+  ctx.moveTo(-r * 1.0, r * 0.0);
+  ctx.quadraticCurveTo(0, r * 0.15, r * 1.0, r * 0.0);
+  ctx.stroke();
+
+  // Specular highlight (shiny leather)
+  const specGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.4, 0, -r * 0.3, -r * 0.4, r * 0.7);
+  specGrad.addColorStop(0, 'rgba(255,255,255,0.28)');
+  specGrad.addColorStop(0.5, 'rgba(255,255,255,0.08)');
+  specGrad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = specGrad;
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.3, -r * 0.35, r * 0.5, r * 0.6, -0.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Lace/stitching at top
+  ctx.fillStyle = '#e8d8c0';
+  ctx.fillRect(-r * 0.15, -r * 1.12, r * 0.3, r * 0.15);
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.lineWidth = 0.5;
+  ctx.strokeRect(-r * 0.15, -r * 1.12, r * 0.3, r * 0.15);
+
+  ctx.restore();
+  ctx.restore();
+}
+
+// =========================================================================
+//  RENDERING — HEAVY BAG
+// =========================================================================
+function drawHeavyBag(ctx) {
+  const hb = state.heavyBag;
+  const mx = hb.mountX;
+  const my = hb.mountY;
+  const angle = hb.angle;
+  const hw = hb.bagWidth;
+  const bagLen = hb.length;
+
+  ctx.save();
+
+  // --- Ceiling mount plate ---
+  const plateW = hw * 1.2, plateH = 8;
+  const plateGrad = ctx.createLinearGradient(mx - plateW/2, my - plateH, mx + plateW/2, my);
+  plateGrad.addColorStop(0, '#666');
+  plateGrad.addColorStop(0.3, '#aaa');
+  plateGrad.addColorStop(0.5, '#ccc');
+  plateGrad.addColorStop(0.7, '#aaa');
+  plateGrad.addColorStop(1, '#666');
+  ctx.fillStyle = plateGrad;
+  ctx.beginPath();
+  ctx.roundRect(mx - plateW/2, my - plateH, plateW, plateH, 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // --- Chains (3 chains converging from plate to bag top) ---
+  const chainEnd = {
+    x: mx + Math.sin(angle) * hb.chainLength,
+    y: my + Math.cos(angle) * hb.chainLength
+  };
+  const chainOffsets = [-plateW * 0.35, 0, plateW * 0.35];
+  for (const ox of chainOffsets) {
+    const startX = mx + ox;
+    const startY = my;
+    const endX = chainEnd.x;
+    const endY = chainEnd.y;
+    const links = 5;
+    for (let i = 0; i < links; i++) {
+      const t1 = i / links;
+      const t2 = (i + 0.5) / links;
+      const lx = startX + (endX - startX) * t1;
+      const ly = startY + (endY - startY) * t1;
+      const lx2 = startX + (endX - startX) * t2;
+      const ly2 = startY + (endY - startY) * t2;
+      // Alternate link orientation
+      const linkAngle = Math.atan2(ly2 - ly, lx2 - lx);
+      ctx.save();
+      ctx.translate(lx + (lx2-lx)*0.5, ly + (ly2-ly)*0.5);
+      ctx.rotate(linkAngle + (i % 2 === 0 ? 0 : Math.PI/2));
+      const linkGrad = ctx.createLinearGradient(-2, -4, 2, 4);
+      linkGrad.addColorStop(0, '#888');
+      linkGrad.addColorStop(0.5, '#ccc');
+      linkGrad.addColorStop(1, '#888');
+      ctx.strokeStyle = linkGrad;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 3, 5, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // --- D-ring at chain/bag junction ---
+  ctx.fillStyle = '#b0b0b0';
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(chainEnd.x, chainEnd.y, 6, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+
+  // --- Bag body ---
+  ctx.save();
+  ctx.translate(chainEnd.x, chainEnd.y);
+  ctx.rotate(angle);
+
+  // Drop shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(4, bagLen * 0.5, hw * 0.95, bagLen * 0.48, 0.05, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Main leather body — cylindrical with rounded top and tapered bottom
+  const bodyGrad = ctx.createLinearGradient(-hw * 1.1, 0, hw * 1.1, 0);
+  bodyGrad.addColorStop(0, '#3a1508');
+  bodyGrad.addColorStop(0.08, '#5c2210');
+  bodyGrad.addColorStop(0.2, '#7a3318');
+  bodyGrad.addColorStop(0.4, '#984422');
+  bodyGrad.addColorStop(0.55, '#a8502a');
+  bodyGrad.addColorStop(0.7, '#984422');
+  bodyGrad.addColorStop(0.85, '#7a3318');
+  bodyGrad.addColorStop(0.95, '#5c2210');
+  bodyGrad.addColorStop(1, '#3a1508');
+  ctx.fillStyle = bodyGrad;
+
+  const topR = hw * 0.4;
+  const botR = hw * 0.5;
+  const taperStart = bagLen * 0.82;
+  const botWidth = hw * 0.75;
+  ctx.beginPath();
+  // Top left rounded corner
+  ctx.moveTo(-hw, topR);
+  ctx.quadraticCurveTo(-hw, 0, -hw + topR, 0);
+  // Top edge with reinforcement strip visual
+  ctx.lineTo(hw - topR, 0);
+  ctx.quadraticCurveTo(hw, 0, hw, topR);
+  // Right side down to taper
+  ctx.lineTo(hw, taperStart);
+  // Taper to narrower bottom
+  ctx.quadraticCurveTo(hw, bagLen - botR, botWidth, bagLen - botR);
+  // Bottom curve
+  ctx.quadraticCurveTo(0, bagLen + botR * 0.3, -botWidth, bagLen - botR);
+  // Left taper back up
+  ctx.quadraticCurveTo(-hw, bagLen - botR, -hw, taperStart);
+  ctx.closePath();
+  ctx.fill();
+
+  // Outline for definition
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // --- Top reinforcement strip (nylon/canvas) ---
+  const stripH = bagLen * 0.06;
+  const stripGrad = ctx.createLinearGradient(-hw, 0, hw, 0);
+  stripGrad.addColorStop(0, '#2a1505');
+  stripGrad.addColorStop(0.3, '#4a2a15');
+  stripGrad.addColorStop(0.5, '#5a3520');
+  stripGrad.addColorStop(0.7, '#4a2a15');
+  stripGrad.addColorStop(1, '#2a1505');
+  ctx.fillStyle = stripGrad;
+  ctx.beginPath();
+  ctx.moveTo(-hw + topR * 0.5, 0);
+  ctx.lineTo(hw - topR * 0.5, 0);
+  ctx.quadraticCurveTo(hw, 0, hw, topR * 0.5);
+  ctx.lineTo(hw, stripH);
+  ctx.lineTo(-hw, stripH);
+  ctx.lineTo(-hw, topR * 0.5);
+  ctx.quadraticCurveTo(-hw, 0, -hw + topR * 0.5, 0);
+  ctx.closePath();
+  ctx.fill();
+  // Strip stitching
+  ctx.strokeStyle = 'rgba(200,170,120,0.35)';
+  ctx.lineWidth = 0.8;
+  ctx.setLineDash([2, 3]);
+  ctx.beginPath();
+  ctx.moveTo(-hw + 4, stripH - 2);
+  ctx.lineTo(hw - 4, stripH - 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // --- Panel seams (vertical, 4 panels like a real bag) ---
+  ctx.strokeStyle = 'rgba(40, 15, 5, 0.5)';
+  ctx.lineWidth = 1;
+  for (const sx of [-hw * 0.5, 0, hw * 0.5]) {
+    ctx.beginPath();
+    ctx.moveTo(sx, stripH + 2);
+    ctx.lineTo(sx, taperStart);
+    // Curve inward with taper
+    ctx.quadraticCurveTo(sx, bagLen * 0.9, sx * 0.75, bagLen - botR);
+    ctx.stroke();
+  }
+
+  // --- Horizontal stitching rows ---
+  ctx.strokeStyle = 'rgba(200,170,120,0.2)';
+  ctx.lineWidth = 0.7;
+  ctx.setLineDash([2, 4]);
+  for (let sy = bagLen * 0.2; sy < bagLen * 0.8; sy += bagLen * 0.2) {
+    const widthAtY = sy < taperStart ? hw : hw * (1 - (sy - taperStart) / (bagLen - taperStart) * 0.25);
+    ctx.beginPath();
+    ctx.moveTo(-widthAtY + 4, sy);
+    ctx.lineTo(widthAtY - 4, sy);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // --- Specular highlight (cylindrical shine) ---
+  const specGrad = ctx.createLinearGradient(-hw * 0.6, 0, -hw * 0.1, 0);
+  specGrad.addColorStop(0, 'rgba(255,255,255,0)');
+  specGrad.addColorStop(0.4, 'rgba(255,255,255,0.12)');
+  specGrad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = specGrad;
+  ctx.fillRect(-hw * 0.6, stripH, hw * 0.5, taperStart - stripH);
+
+  // --- Brand/logo area (embossed circle) ---
+  const logoY = bagLen * 0.42;
+  ctx.strokeStyle = 'rgba(180,120,60,0.2)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, logoY, hw * 0.4, 0, Math.PI * 2);
+  ctx.stroke();
+  // Inner text-like embossing
+  ctx.strokeStyle = 'rgba(180,120,60,0.15)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(0, logoY, hw * 0.25, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // --- Bottom cap ---
+  const capGrad = ctx.createLinearGradient(-botWidth, bagLen - botR * 1.5, botWidth, bagLen);
+  capGrad.addColorStop(0, '#2a1505');
+  capGrad.addColorStop(0.5, '#3d2010');
+  capGrad.addColorStop(1, '#2a1505');
+  ctx.fillStyle = capGrad;
+  ctx.beginPath();
+  ctx.ellipse(0, bagLen - botR * 0.5, botWidth * 0.8, botR * 0.6, 0, 0, Math.PI);
+  ctx.fill();
+
+  ctx.restore();
+  ctx.restore();
+}
+
+// =========================================================================
+//  RENDERING — BOXING GLOVES (fitted to hand landmarks)
+// =========================================================================
+function drawGloves(ctx) {
+  const drawGlove = (hand, side) => {
+    if (!hand.pos || !hand.landmarks) return;
+    const lm = hand.landmarks;
+
+    // Key points: wrist(0), thumb tip(4), index MCP(5), pinky MCP(17),
+    // middle tip(12), index tip(8)
+    const wrist = lm[0];
+    const thumbTip = lm[4];
+    const indexMCP = lm[5];
+    const middleMCP = lm[9];
+    const pinkyMCP = lm[17];
+    const middleTip = lm[12];
+    const indexTip = lm[8];
+
+    // Hand center and orientation
+    const cx = (wrist.x + indexMCP.x + pinkyMCP.x + middleMCP.x) / 4;
+    const cy = (wrist.y + indexMCP.y + pinkyMCP.y + middleMCP.y) / 4;
+
+    // Hand size from wrist to middle MCP
+    const handSize = Math.hypot(middleMCP.x - wrist.x, middleMCP.y - wrist.y);
+    if (handSize < 10) return;
+
+    // Hand angle
+    const handAngle = Math.atan2(middleMCP.y - wrist.y, middleMCP.x - wrist.x);
+
+    // Padding around landmarks for glove shape
+    const pad = handSize * 0.35;
+    const fistPad = hand.fist ? handSize * 0.15 : 0;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(handAngle);
+
+    // Glove color — richer red when fist clenched
+    const r1 = hand.fist ? 200 : 170;
+    const g1 = hand.fist ? 30 : 45;
+    const b1 = hand.fist ? 30 : 45;
+
+    // --- Wrist/cuff area ---
+    const cuffLen = handSize * 0.45;
+    const cuffW = handSize * 0.4;
+    const cuffGrad = ctx.createLinearGradient(-cuffLen, -cuffW, -cuffLen, cuffW);
+    cuffGrad.addColorStop(0, `rgb(${r1-40},${g1},${b1})`);
+    cuffGrad.addColorStop(0.5, `rgb(${r1-20},${g1+10},${b1+10})`);
+    cuffGrad.addColorStop(1, `rgb(${r1-40},${g1},${b1})`);
+    ctx.fillStyle = cuffGrad;
+    ctx.beginPath();
+    ctx.roundRect(-cuffLen - handSize * 0.1, -cuffW, cuffLen, cuffW * 2, handSize * 0.1);
+    ctx.fill();
+
+    // Velcro strap on cuff
+    ctx.fillStyle = `rgba(${r1-80},${Math.max(0,g1-15)},${Math.max(0,b1-15)},0.8)`;
+    ctx.beginPath();
+    ctx.roundRect(-cuffLen, -cuffW * 0.65, cuffLen * 0.7, cuffW * 1.3, 3);
+    ctx.fill();
+    // Strap edge
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    // --- Main glove body ---
+    // Build the glove shape from hand landmarks (in rotated space, x=forward, y=side)
+    const knuckleX = handSize * 0.4;
+    const bodyW = handSize * 0.5 + pad + fistPad;
+    const bodyH = handSize * 0.55 + pad;
+
+    // Main padding — the striking surface
+    const mainGrad = ctx.createRadialGradient(
+      knuckleX - bodyW * 0.2, -bodyH * 0.1, 0,
+      knuckleX, 0, bodyW * 1.2
+    );
+    mainGrad.addColorStop(0, `rgb(${r1+35},${g1+25},${b1+25})`);
+    mainGrad.addColorStop(0.4, `rgb(${r1},${g1},${b1})`);
+    mainGrad.addColorStop(0.8, `rgb(${r1-30},${g1-10},${b1-10})`);
+    mainGrad.addColorStop(1, `rgb(${r1-60},${Math.max(0,g1-20)},${Math.max(0,b1-20)})`);
+    ctx.fillStyle = mainGrad;
+
+    ctx.beginPath();
+    // Start from cuff connection (bottom-left of glove body)
+    ctx.moveTo(-handSize * 0.05, -cuffW);
+    // Curve up to thumb side
+    ctx.quadraticCurveTo(knuckleX * 0.3, -bodyH - fistPad * 0.5, knuckleX, -bodyH);
+    // Across knuckle front
+    ctx.quadraticCurveTo(knuckleX + bodyW * 0.7, -bodyH * 0.8, knuckleX + bodyW * 0.5, 0);
+    // Down the bottom (pinky side)
+    ctx.quadraticCurveTo(knuckleX + bodyW * 0.7, bodyH * 0.8, knuckleX, bodyH);
+    // Back to cuff
+    ctx.quadraticCurveTo(knuckleX * 0.3, bodyH + fistPad * 0.5, -handSize * 0.05, cuffW);
+    ctx.closePath();
+    ctx.fill();
+
+    // Outline
+    ctx.strokeStyle = `rgba(${r1-80},0,0,0.5)`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // --- Thumb bump ---
+    const thumbX = knuckleX * 0.2;
+    const thumbY = -bodyH * 0.5;
+    const thumbR = handSize * 0.18;
+    const thumbGrad = ctx.createRadialGradient(thumbX, thumbY, 0, thumbX, thumbY, thumbR);
+    thumbGrad.addColorStop(0, `rgb(${r1+20},${g1+15},${b1+15})`);
+    thumbGrad.addColorStop(1, `rgb(${r1-10},${g1},${b1})`);
+    ctx.fillStyle = thumbGrad;
+    ctx.beginPath();
+    ctx.ellipse(thumbX, thumbY, thumbR, thumbR * 1.3, handAngle + 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = `rgba(${r1-80},0,0,0.3)`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // --- Knuckle ridge (when fist is clenched) ---
+    if (hand.fist) {
+      ctx.strokeStyle = `rgba(${r1-50},0,0,0.4)`;
+      ctx.lineWidth = 1.5;
+      for (let i = 0; i < 4; i++) {
+        const ky = -bodyH * 0.55 + (bodyH * 1.1 / 3) * i;
+        ctx.beginPath();
+        ctx.moveTo(knuckleX + bodyW * 0.15, ky);
+        ctx.quadraticCurveTo(knuckleX + bodyW * 0.35, ky + bodyH * 0.02, knuckleX + bodyW * 0.15, ky + bodyH * 0.08);
+        ctx.stroke();
+      }
+    }
+
+    // --- Specular highlight ---
+    const specGrad = ctx.createRadialGradient(
+      knuckleX - bodyW * 0.1, -bodyH * 0.3, 0,
+      knuckleX, 0, bodyW * 0.8
+    );
+    specGrad.addColorStop(0, 'rgba(255,255,255,0.2)');
+    specGrad.addColorStop(0.4, 'rgba(255,255,255,0.06)');
+    specGrad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = specGrad;
+    ctx.beginPath();
+    ctx.ellipse(knuckleX - bodyW * 0.05, -bodyH * 0.25, bodyW * 0.4, bodyH * 0.5, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- Lace stitching along top seam ---
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 0.8;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, -cuffW * 0.3);
+    ctx.quadraticCurveTo(knuckleX * 0.5, -bodyH * 0.85, knuckleX + bodyW * 0.2, -bodyH * 0.6);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.restore();
+  };
+
+  drawGlove(state.hands.left, 'left');
+  drawGlove(state.hands.right, 'right');
+}
+
+// =========================================================================
+//  P5.JS SETUP + DRAW
+// =========================================================================
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  state.lastFrameTime = millis();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+
+function draw() {
+  if (!state.initialized) return;
+
+  const now = millis();
+  let dt = (now - state.lastFrameTime) / 1000;
+  dt = Math.min(dt, 0.05); // Clamp to 50ms max
+  state.lastFrameTime = now;
+
+  const ctx = drawingContext;
+
+  // 1. Camera background
+  drawBackground(ctx);
+
+  // 2. Process tracking data
+  const t = performance.now();
+  processBody(t);
+  processHands(t);
+
+  // 3. Update equipment positions from body
+  updateEquipmentPositions();
+
+  // 4. Detect punches and handle hits
+  detectPunches();
+
+  // 5. Update bag physics
+  updateSpeedBag(dt);
+  updateHeavyBag(dt);
+
+  // 6. Combo system
+  if (state.combo.active) {
+    updateComboTimer();
+  } else if (state.body.valid && now > state.combo.nextComboTime) {
+    startCombo();
+    state.combo.nextComboTime = now + 18000 + Math.random() * 4000;
+  }
+
+  // 7. Render with shake
+  ctx.save();
+  applyShake(ctx);
+
+  // Draw equipment
+  if (state.body.valid) {
+    drawHeavyBag(ctx);
+    drawSpeedBag(ctx);
+  }
+
+  // Draw gloves
+  drawGloves(ctx);
+
+  // Draw particles
+  updateAndDrawParticles(ctx);
+
+  ctx.restore();
+
+  // 8. Flash overlay (after restore so it covers full screen)
+  drawFlash(ctx);
+
+  // 9. Update stats HUD
+  updateStatsDisplay();
+}
+
+// =========================================================================
+//  START BUTTON
+// =========================================================================
+document.getElementById('startBtn').addEventListener('click', () => {
+  document.getElementById('startBtn').remove();
+  setStatus('Loading models...');
+  // Unlock audio context
+  getAudioCtx();
+  // Init MediaPipe
+  initMediaPipe();
+  state.initialized = true;
+  state.stats.sessionStart = millis();
+});
+</script>
+</body>
+</html>

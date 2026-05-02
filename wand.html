@@ -1289,6 +1289,7 @@ function updateWand() {
       const tyS = oneEuro(state.wandFilters.ty, cw.tip.y,  wt, 0.6, 0.05);
       state.wandBase = { x: bxS, y: byS };
       state.wandTip  = { x: txS, y: tyS };
+      state.lastWandTip = state.wandTip;
       const sdx = txS - bxS, sdy = tyS - byS;
       const slen = Math.hypot(sdx, sdy) + 1e-3;
       state.wandDir = { x: sdx / slen, y: sdy / slen };
@@ -1339,6 +1340,10 @@ function updateWand() {
     state.smoothedLm[i].y = oneEuro(state.lmFilters[i].y, rawPts[i].y, now);
   }
   const pts = state.smoothedLm;
+  // Cache hand anchor for tip/base ordering across all detection sources.
+  // Use wrist (landmark 0) — that's where the wand emerges from the fist.
+  state.lastHandPos = { x: pts[0].x, y: pts[0].y };
+  state.lastHandPosAt = millis();
 
   // Hand-local frame: forward = wrist→knuckle-center, perp = 90° CCW
   const wrist = pts[0];
@@ -1414,6 +1419,7 @@ function updateWand() {
   const tyS = oneEuro(state.wandFilters.ty, useTip.y,  wt, 0.6, 0.05);
   state.wandBase = { x: bxS, y: byS };
   state.wandTip  = { x: txS, y: tyS };
+  state.lastWandTip = state.wandTip;
   // Recompute spell direction from the SMOOTHED endpoints so spells aim
   // through the visible wand line, not through the raw landmark frame.
   const sdx = txS - bxS, sdy = tyS - byS;
@@ -2386,6 +2392,36 @@ function drawDummies(ctx) {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+// Tip/base ordering — the wand tip is ALWAYS the endpoint farther from the
+// hand. Hand position is cached from MediaPipe (state.lastHandPos = wrist
+// landmark 0 in canvas coords); when MediaPipe never gave us a hand we
+// fall back to bottom-center of the frame as the assumed hand region.
+// Last-known tip is used only as a tie-breaker when the two endpoints are
+// nearly equidistant from the hand.
+function chooseTipBase(A, B) {
+  const TIE = 18; // px — under this margin we use the tie-breaker
+  let anchorX, anchorY, haveAnchor = false;
+  if (state.lastHandPos) {
+    anchorX = state.lastHandPos.x; anchorY = state.lastHandPos.y;
+    haveAnchor = true;
+  } else {
+    anchorX = width * 0.5; anchorY = height * 0.88;
+  }
+  const dA = Math.hypot(A.x - anchorX, A.y - anchorY);
+  const dB = Math.hypot(B.x - anchorX, B.y - anchorY);
+  if (Math.abs(dA - dB) > TIE) {
+    return dA > dB ? { tip: A, base: B } : { tip: B, base: A };
+  }
+  // Tie: prefer continuity with last known tip
+  if (state.lastWandTip) {
+    const tA = Math.hypot(A.x - state.lastWandTip.x, A.y - state.lastWandTip.y);
+    const tB = Math.hypot(B.x - state.lastWandTip.x, B.y - state.lastWandTip.y);
+    return tA < tB ? { tip: A, base: B } : { tip: B, base: A };
+  }
+  // Last-resort: still prefer the endpoint farther from the assumed anchor
+  return dA > dB ? { tip: A, base: B } : { tip: B, base: A };
+}
+
 // Color-based wand tracking — runs each frame on a downscaled mirrored
 // video frame, finds pixels matching the sampled wand color, and derives
 // principal axis + extents.
@@ -2484,24 +2520,10 @@ function detectWandFromColor() {
   const sxF = width / OFF_W, syF = height / OFF_H;
   const A = { x: e1.x * sxF, y: e1.y * syF };
   const B = { x: e2.x * sxF, y: e2.y * syF };
-  // Decide which endpoint is "tip": prefer the one closer to last tip;
-  // otherwise the one further from the bottom-center of frame (where
-  // user's hand likely sits) — heuristic, not perfect.
-  let tip, base;
-  if (state.lastColorWandTip) {
-    const dA = Math.hypot(A.x - state.lastColorWandTip.x, A.y - state.lastColorWandTip.y);
-    const dB = Math.hypot(B.x - state.lastColorWandTip.x, B.y - state.lastColorWandTip.y);
-    tip = dA < dB ? A : B;
-    base = dA < dB ? B : A;
-  } else {
-    const handY = height * 0.85;
-    const dA = Math.abs(A.y - handY);
-    const dB = Math.abs(B.y - handY);
-    tip = dA > dB ? A : B;
-    base = dA > dB ? B : A;
-  }
-  state.lastColorWandTip = tip;
-  return { base, tip, count };
+  // Tip = endpoint farther from the hand (cached MediaPipe wrist).
+  const order = chooseTipBase(A, B);
+  state.lastColorWandTip = order.tip;
+  return { base: order.base, tip: order.tip, count };
 }
 
 // Hough Line Transform via OpenCV.js — detects the wand directly as a
@@ -2581,27 +2603,9 @@ function detectWandViaHough(wristPoint /* in canvas coords, may be null */) {
     const A = { x: best.x1 * sx, y: best.y1 * sy };
     const B = { x: best.x2 * sx, y: best.y2 * sy };
 
-    // Determine tip vs base
-    let tip, base;
-    if (state.lastHoughWand) {
-      const dA = Math.hypot(A.x - state.lastHoughWand.tip.x, A.y - state.lastHoughWand.tip.y);
-      const dB = Math.hypot(B.x - state.lastHoughWand.tip.x, B.y - state.lastHoughWand.tip.y);
-      tip  = dA < dB ? A : B;
-      base = dA < dB ? B : A;
-    } else if (wristPoint) {
-      // Endpoint farther from wrist = tip
-      const dA = Math.hypot(A.x - wristPoint.x, A.y - wristPoint.y);
-      const dB = Math.hypot(B.x - wristPoint.x, B.y - wristPoint.y);
-      tip  = dA > dB ? A : B;
-      base = dA > dB ? B : A;
-    } else {
-      // Heuristic: hand is usually near bottom of frame
-      const handY = height * 0.85;
-      tip  = Math.abs(A.y - handY) > Math.abs(B.y - handY) ? A : B;
-      base = tip === A ? B : A;
-    }
-
-    const result = { base, tip, score: best.score };
+    // Tip = endpoint farther from the cached hand position
+    const order = chooseTipBase(A, B);
+    const result = { base: order.base, tip: order.tip, score: best.score };
     state.lastHoughWand = result;
     return result;
   } catch (e) {
@@ -2774,20 +2778,11 @@ function detectWandViaLock() {
     const dx = Math.cos(state.lockedAngle), dy = Math.sin(state.lockedAngle);
     const A = { x: state.lockedCenter.x + dx * halfL, y: state.lockedCenter.y + dy * halfL };
     const B = { x: state.lockedCenter.x - dx * halfL, y: state.lockedCenter.y - dy * halfL };
-    let tip, base;
-    if (state.lastLockedTip) {
-      const dA = Math.hypot(A.x - state.lastLockedTip.x, A.y - state.lastLockedTip.y);
-      const dB = Math.hypot(B.x - state.lastLockedTip.x, B.y - state.lastLockedTip.y);
-      tip = dA < dB ? A : B; base = tip === A ? B : A;
-    } else {
-      // Heuristic: tip is the endpoint farther from bottom-center
-      const handY = height * 0.85;
-      tip = Math.abs(A.y - handY) > Math.abs(B.y - handY) ? A : B;
-      base = tip === A ? B : A;
-    }
-    state.lastLockedTip = tip;
+    // Tip = endpoint farther from the hand
+    const order = chooseTipBase(A, B);
+    state.lastLockedTip = order.tip;
     updateLockUI();
-    return { base, tip, score: mm.maxVal };
+    return { base: order.base, tip: order.tip, score: mm.maxVal };
   } catch (e) {
     console.warn('Lock track error', e);
     return null;

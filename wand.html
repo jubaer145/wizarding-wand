@@ -98,13 +98,16 @@
 <div id="hedwigToggle" style="position:fixed; top:64px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(255,215,128,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#ffd780; font-family:monospace; cursor:pointer;" title="Click or press M to toggle Hedwig's Theme">
   ♪ Hedwig's Theme: on (M)
 </div>
-<div id="houghStatus" style="position:fixed; top:90px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.7); border:1px solid rgba(255,49,210,0.4); border-radius:4px; font-size:11px; letter-spacing:1px; color:#ff9be0; font-family:monospace; cursor:pointer;" title="Direct wand detection via OpenCV Hough Lines. Click or H to toggle.">
+<div id="lockStatus" style="position:fixed; top:90px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.75); border:1px solid rgba(180,180,180,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#cccccc; font-family:monospace; cursor:pointer;" title="Click here or press L, then click your wand. Locks for stable tracking.">
+  🔒 Lock to wand: L + click
+</div>
+<div id="houghStatus" style="position:fixed; top:116px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.7); border:1px solid rgba(255,49,210,0.4); border-radius:4px; font-size:11px; letter-spacing:1px; color:#ff9be0; font-family:monospace; cursor:pointer;" title="Direct wand detection via OpenCV Hough Lines. Click or H to toggle.">
   ⌬ Hough detection: loading…
 </div>
-<div id="colorTrack" style="position:fixed; top:116px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.7); border:1px solid rgba(180,180,180,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#bbbbbb; font-family:monospace; cursor:pointer;" title="Click here to enter color-pick mode, then click your wand. P=pick, X=clear">
+<div id="colorTrack" style="position:fixed; top:142px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.7); border:1px solid rgba(180,180,180,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#bbbbbb; font-family:monospace; cursor:pointer;" title="Click here to enter color-pick mode, then click your wand. P=pick, X=clear">
   P then click your wand to track its color
 </div>
-<div id="ambient" style="position:fixed; top:142px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(150,200,255,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#aabbff; font-family:monospace; cursor:pointer;" title="Click to load an audio file. Drop one anywhere on the page. Press A to toggle.">
+<div id="ambient" style="position:fixed; top:168px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(150,200,255,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#aabbff; font-family:monospace; cursor:pointer;" title="Click to load an audio file. Drop one anywhere on the page. Press A to toggle.">
   Drop ambient sound here  ·  click to choose
 </div>
 <input type="file" id="ambientFile" accept="audio/*" style="display:none;">
@@ -131,9 +134,9 @@
   <div><span class="spell">Alohomora / Reparo</span> <span class="effect">— sparkle</span></div>
   <div style="margin-top:6px; color: #886; font-size: 10px; font-style: italic;">
     Speak the incantation, then flick to cast.<br>
-    <b>H</b> Hough auto-detect (best). <b>P</b>+click = color.<br>
-    <b>K</b> drag base→tip · <b>R</b> reset · <b>D</b> debug.<br>
-    <b>M</b> music · <b>A</b> ambient · "Mischief Managed" clears.
+    <b>L</b>+click locks tracker (best stability).<br>
+    <b>H</b> Hough · <b>P</b>+click color · <b>K</b> drag align.<br>
+    <b>R</b> reset · <b>D</b> debug · <b>M</b> music · <b>A</b> ambient.
   </div>
 </div>
 <div id="heard"></div>
@@ -321,6 +324,23 @@ const HOUGH_MIN_LEN       = 30;
 const HOUGH_MAX_GAP       = 12;
 const HOUGH_PROXIMITY_R   = 80;
 
+// Click-to-lock template tracker (most reliable wand tracking method).
+// User clicks once on the wand; we save a small patch and track it via
+// cv.matchTemplate every frame. Orientation is refreshed via small Hough
+// in a tight ROI around the tracked center.
+state.lockingMode = false;            // waiting for click to capture template
+state.locked = false;
+state.wandTemplate = null;            // cv.Mat
+state.lockedCenter = null;            // {x, y} in canvas coords
+state.lockedAngle = -Math.PI / 2;     // radians, default = up
+state.lockedLength = 200;             // canvas px
+state.lockedConfidence = 0;
+state.lastLockedTip = null;
+state.lockReorientFrame = 0;
+const LOCK_PATCH_SIZE       = 36;     // off-canvas px (square)
+const LOCK_SEARCH_FACTOR    = 2.6;    // search window = patch * factor
+const LOCK_CONFIDENCE_KEEP  = 0.40;   // below this we report a miss
+
 window.onCvReady = function() {
   // OpenCV declares itself globally as `cv`. The Module sets a callback
   // for when the WASM runtime finishes initializing.
@@ -420,6 +440,16 @@ function keyPressed() {
     updateHoughUI();
     setStatus(state.houghEnabled ? 'Hough on' : 'Hough off');
   }
+  else if (key === 'l' || key === 'L') {
+    if (state.locked) {
+      clearLock();
+      setStatus('Wand unlocked');
+    } else {
+      state.lockingMode = true;
+      updateLockUI();
+      setStatus('Click on your wand to lock');
+    }
+  }
   else if (key === 'x' || key === 'X') {
     if (state.wandColor) {
       clearWandColor();
@@ -466,6 +496,14 @@ function beginCalibration() {
 }
 
 function mousePressed() {
+  if (state.lockingMode) {
+    if (captureWandTemplate(mouseX, mouseY)) {
+      setStatus('Locked. Tracking your wand.');
+    } else {
+      setStatus('Could not lock — try again');
+    }
+    return false;
+  }
   if (state.colorPicking) {
     if (pickWandColorAt(mouseX, mouseY)) {
       setStatus('Color sampled. Wand tracking active.');
@@ -1187,6 +1225,12 @@ function wireAmbientUI() {
     state.houghEnabled = !state.houghEnabled; updateHoughUI();
   });
   updateHoughUI();
+  const lockEl = document.getElementById('lockStatus');
+  if (lockEl) lockEl.addEventListener('click', () => {
+    if (state.locked) clearLock();
+    else { state.lockingMode = true; updateLockUI(); setStatus('Click on your wand to lock'); }
+  });
+  updateLockUI();
   if (el) el.addEventListener('click', () => input && input.click());
   if (input) input.addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
@@ -1223,11 +1267,11 @@ function updateWand() {
     && state.latestResults.multiHandLandmarks
     && state.latestResults.multiHandLandmarks.length > 0;
 
-  // No-MediaPipe path: if Hough is ready or color is set, we can still
-  // locate the wand directly from the video frame.
-  if (!haveDetection && (state.cvReady && state.houghEnabled || state.wandColor)) {
+  // No-MediaPipe path: lock → Hough → color, in that priority.
+  if (!haveDetection && (state.locked || (state.cvReady && state.houghEnabled) || state.wandColor)) {
     let cw = null;
-    if (state.cvReady && state.houghEnabled) cw = detectWandViaHough(null);
+    if (state.locked) cw = detectWandViaLock();
+    if (!cw && state.cvReady && state.houghEnabled) cw = detectWandViaHough(null);
     if (!cw && state.wandColor) cw = detectWandFromColor();
     if (cw) {
       state.colorWand = cw;
@@ -1326,12 +1370,20 @@ function updateWand() {
   state._perp = { x: perpX, y: perpY };
 
   // Detection priority for the wand position:
-  //   1. OpenCV Hough Line (direct detection of the wand as a line segment)
-  //   2. Color tracking (PCA on color-matched pixels)
-  //   3. MediaPipe extrapolation (default — works only when hand pose is good)
+  //   1. Click-to-lock template tracker (rock-solid, requires one-time click)
+  //   2. OpenCV Hough Line (direct detection of the wand as a line segment)
+  //   3. Color tracking (PCA on color-matched pixels)
+  //   4. MediaPipe extrapolation (default — works only when hand pose is good)
   let useBase = base, useTip = tip;
   let detSource = 'mediapipe';
-  if (state.cvReady && state.houghEnabled) {
+  if (state.locked) {
+    const lk = detectWandViaLock();
+    if (lk) {
+      useBase = lk.base; useTip = lk.tip;
+      detSource = 'lock';
+    }
+  }
+  if (detSource === 'mediapipe' && state.cvReady && state.houghEnabled) {
     const hw = detectWandViaHough(wrist);
     if (hw) {
       useBase = hw.base; useTip = hw.tip;
@@ -2561,6 +2613,222 @@ function detectWandViaHough(wristPoint /* in canvas coords, may be null */) {
     if (blur)  blur.delete();
     if (edges) edges.delete();
     if (lines) lines.delete();
+  }
+}
+
+// Capture a template patch around (cx, cy) in canvas coords, plus an
+// initial orientation/length estimate. Activates the lock tracker.
+function captureWandTemplate(cx, cy) {
+  if (!state.cvReady) { setStatus('OpenCV still loading…'); return false; }
+  if (!refreshOffCanvas()) return false;
+  const ocxScale = OFF_W / width, ocyScale = OFF_H / height;
+  const ocx = Math.floor(cx * ocxScale), ocy = Math.floor(cy * ocyScale);
+  const patchSize = LOCK_PATCH_SIZE;
+  const px = Math.max(0, Math.min(OFF_W - patchSize, ocx - patchSize / 2));
+  const py = Math.max(0, Math.min(OFF_H - patchSize, ocy - patchSize / 2));
+
+  let frame = null, gray = null, blur = null, edges = null, lines = null;
+  let oROI = null;
+  try {
+    frame = cv.matFromImageData(state.offCtx.getImageData(0, 0, OFF_W, OFF_H));
+    gray = new cv.Mat();
+    cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
+    if (state.wandTemplate) { state.wandTemplate.delete(); state.wandTemplate = null; }
+    state.wandTemplate = gray.roi(new cv.Rect(px, py, patchSize, patchSize)).clone();
+
+    // Initial orientation/length: small Hough on a 100×100 ROI around click
+    const orientPatch = 100;
+    const ox = Math.max(0, Math.min(OFF_W - orientPatch, ocx - orientPatch / 2));
+    const oy = Math.max(0, Math.min(OFF_H - orientPatch, ocy - orientPatch / 2));
+    const ow = Math.min(orientPatch, OFF_W - ox);
+    const oh = Math.min(orientPatch, OFF_H - oy);
+    oROI = gray.roi(new cv.Rect(ox, oy, ow, oh));
+    blur = new cv.Mat();
+    cv.GaussianBlur(oROI, blur, new cv.Size(5, 5), 1.5, 1.5, cv.BORDER_DEFAULT);
+    edges = new cv.Mat();
+    cv.Canny(blur, edges, 50, 150);
+    lines = new cv.Mat();
+    cv.HoughLinesP(edges, lines, 1, Math.PI / 180, 18, 18, 8);
+
+    let bestLen = 0, bestAngle = -Math.PI / 2; // default vertical-up
+    for (let i = 0; i < lines.rows; i++) {
+      const j = i * 4;
+      const x1 = lines.data32S[j],   y1 = lines.data32S[j+1];
+      const x2 = lines.data32S[j+2], y2 = lines.data32S[j+3];
+      const len = Math.hypot(x2 - x1, y2 - y1);
+      if (len > bestLen) {
+        bestLen = len;
+        bestAngle = Math.atan2(y2 - y1, x2 - x1);
+      }
+    }
+    state.lockedAngle  = bestAngle;
+    // Wand length in canvas coords. If Hough didn't find a long line,
+    // estimate generously (we'll refine on subsequent frames).
+    const ocLen = bestLen > 25 ? bestLen * 1.4 : 90;
+    state.lockedLength = ocLen * (width / OFF_W);
+
+    state.lockedCenter   = { x: cx, y: cy };
+    state.lastLockedTip  = null;
+    state.lockedConfidence = 1.0;
+    state.locked         = true;
+    state.lockingMode    = false;
+    state.lockReorientFrame = 0;
+    updateLockUI();
+    return true;
+  } catch (e) {
+    console.error('captureWandTemplate', e);
+    return false;
+  } finally {
+    if (frame) frame.delete();
+    if (gray) gray.delete();
+    if (blur) blur.delete();
+    if (edges) edges.delete();
+    if (lines) lines.delete();
+    if (oROI) oROI.delete();
+  }
+}
+
+// Per-frame: template-match in a search window around last position.
+// Periodically (every ~5 frames) refresh orientation via small Hough
+// in a tight ROI around the new center.
+function detectWandViaLock() {
+  if (!state.locked || !state.wandTemplate || !state.cvReady) return null;
+  if (!refreshOffCanvas()) return null;
+  const sxF = OFF_W / width, syF = OFF_H / height;
+  const cx = state.lockedCenter.x * sxF;
+  const cy = state.lockedCenter.y * syF;
+  const tw = state.wandTemplate.cols, th = state.wandTemplate.rows;
+  const winR = Math.max(tw, th) * LOCK_SEARCH_FACTOR;
+  const wx = Math.max(0, Math.floor(cx - winR));
+  const wy = Math.max(0, Math.floor(cy - winR));
+  const ww = Math.min(OFF_W - wx, Math.floor(winR * 2));
+  const wh = Math.min(OFF_H - wy, Math.floor(winR * 2));
+  if (ww < tw || wh < th) return null;
+
+  let frame = null, gray = null, roi = null, result = null;
+  let blur = null, edges = null, lines = null, ortROI = null;
+  try {
+    frame = cv.matFromImageData(state.offCtx.getImageData(0, 0, OFF_W, OFF_H));
+    gray = new cv.Mat();
+    cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
+    roi = gray.roi(new cv.Rect(wx, wy, ww, wh));
+    result = new cv.Mat();
+    cv.matchTemplate(roi, state.wandTemplate, result, cv.TM_CCOEFF_NORMED);
+    const mm = cv.minMaxLoc(result);
+    state.lockedConfidence = mm.maxVal;
+    if (mm.maxVal < LOCK_CONFIDENCE_KEEP) {
+      updateLockUI();
+      return null;
+    }
+    const newOcx = wx + mm.maxLoc.x + tw / 2;
+    const newOcy = wy + mm.maxLoc.y + th / 2;
+    const fxScale = width / OFF_W, fyScale = height / OFF_H;
+    state.lockedCenter = { x: newOcx * fxScale, y: newOcy * fyScale };
+
+    // Refresh orientation occasionally via small Hough in tight ROI around
+    // the new center. Every 4th frame keeps cost low while staying current.
+    state.lockReorientFrame++;
+    if (state.lockReorientFrame % 4 === 0) {
+      const ortSize = 96;
+      const oox = Math.max(0, Math.min(OFF_W - ortSize, Math.floor(newOcx - ortSize / 2)));
+      const ooy = Math.max(0, Math.min(OFF_H - ortSize, Math.floor(newOcy - ortSize / 2)));
+      const ow = Math.min(ortSize, OFF_W - oox);
+      const oh = Math.min(ortSize, OFF_H - ooy);
+      ortROI = gray.roi(new cv.Rect(oox, ooy, ow, oh));
+      blur = new cv.Mat();
+      cv.GaussianBlur(ortROI, blur, new cv.Size(5, 5), 1.4, 1.4, cv.BORDER_DEFAULT);
+      edges = new cv.Mat();
+      cv.Canny(blur, edges, 50, 150);
+      lines = new cv.Mat();
+      cv.HoughLinesP(edges, lines, 1, Math.PI / 180, 16, 18, 8);
+
+      let bestScore = 0, bestAngle = state.lockedAngle, bestLen = 0;
+      for (let i = 0; i < lines.rows; i++) {
+        const j = i * 4;
+        const x1 = lines.data32S[j],   y1 = lines.data32S[j+1];
+        const x2 = lines.data32S[j+2], y2 = lines.data32S[j+3];
+        const dx = x2 - x1, dy = y2 - y1;
+        const len = Math.hypot(dx, dy);
+        if (len < 18) continue;
+        const ang = Math.atan2(dy, dx);
+        // Continuity score with last orientation (180° symmetry)
+        const dA = Math.abs(((ang - state.lockedAngle + Math.PI) % (Math.PI * 2)) - Math.PI);
+        const orient = Math.max(0.1, Math.cos(Math.min(dA, Math.PI - dA))); // 1 when aligned
+        const score = len * orient;
+        if (score > bestScore) {
+          bestScore = score; bestAngle = ang; bestLen = len;
+        }
+      }
+      // Smooth angle update toward the new measurement
+      const blend = 0.45;
+      const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+      state.lockedAngle = wrap(state.lockedAngle * (1 - blend) + bestAngle * blend);
+      if (bestLen > 25) {
+        const measLen = bestLen * 1.3 * (width / OFF_W);
+        state.lockedLength = state.lockedLength * 0.7 + measLen * 0.3;
+      }
+    }
+
+    // Compute base + tip from center + angle + length
+    const halfL = state.lockedLength / 2;
+    const dx = Math.cos(state.lockedAngle), dy = Math.sin(state.lockedAngle);
+    const A = { x: state.lockedCenter.x + dx * halfL, y: state.lockedCenter.y + dy * halfL };
+    const B = { x: state.lockedCenter.x - dx * halfL, y: state.lockedCenter.y - dy * halfL };
+    let tip, base;
+    if (state.lastLockedTip) {
+      const dA = Math.hypot(A.x - state.lastLockedTip.x, A.y - state.lastLockedTip.y);
+      const dB = Math.hypot(B.x - state.lastLockedTip.x, B.y - state.lastLockedTip.y);
+      tip = dA < dB ? A : B; base = tip === A ? B : A;
+    } else {
+      // Heuristic: tip is the endpoint farther from bottom-center
+      const handY = height * 0.85;
+      tip = Math.abs(A.y - handY) > Math.abs(B.y - handY) ? A : B;
+      base = tip === A ? B : A;
+    }
+    state.lastLockedTip = tip;
+    updateLockUI();
+    return { base, tip, score: mm.maxVal };
+  } catch (e) {
+    console.warn('Lock track error', e);
+    return null;
+  } finally {
+    if (frame) frame.delete();
+    if (gray) gray.delete();
+    if (roi) roi.delete();
+    if (result) result.delete();
+    if (blur) blur.delete();
+    if (edges) edges.delete();
+    if (lines) lines.delete();
+    if (ortROI) ortROI.delete();
+  }
+}
+
+function clearLock() {
+  if (state.wandTemplate) { state.wandTemplate.delete(); state.wandTemplate = null; }
+  state.locked = false;
+  state.lockingMode = false;
+  state.lockedCenter = null;
+  state.lastLockedTip = null;
+  state.lockedConfidence = 0;
+  updateLockUI();
+}
+function updateLockUI() {
+  const el = document.getElementById('lockStatus');
+  if (!el) return;
+  if (state.lockingMode) {
+    el.textContent = '🔒 Click on your wand to lock';
+    el.style.color = '#ffe066'; el.style.borderColor = 'rgba(255,224,102,0.6)';
+  } else if (state.locked) {
+    const c = Math.round((state.lockedConfidence || 0) * 100);
+    el.textContent = `🔒 Locked (${c}%)  ·  L=unlock`;
+    if (state.lockedConfidence > 0.6) {
+      el.style.color = '#aaffaa'; el.style.borderColor = 'rgba(150,255,150,0.55)';
+    } else {
+      el.style.color = '#ffaa55'; el.style.borderColor = 'rgba(255,170,85,0.55)';
+    }
+  } else {
+    el.textContent = '🔒 Lock to wand: L + click';
+    el.style.color = '#cccccc'; el.style.borderColor = 'rgba(180,180,180,0.3)';
   }
 }
 

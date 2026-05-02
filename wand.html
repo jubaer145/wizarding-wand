@@ -440,6 +440,14 @@ function keyPressed() {
     updateHoughUI();
     setStatus(state.houghEnabled ? 'Hough on' : 'Hough off');
   }
+  else if (key === '{') {
+    HAND_REACH_FACTOR = Math.max(0.8, HAND_REACH_FACTOR - 0.2);
+    setStatus(`Hand reach: ${HAND_REACH_FACTOR.toFixed(1)}× palm`);
+  }
+  else if (key === '}') {
+    HAND_REACH_FACTOR = Math.min(5.0, HAND_REACH_FACTOR + 0.2);
+    setStatus(`Hand reach: ${HAND_REACH_FACTOR.toFixed(1)}× palm`);
+  }
   else if (key === 'l' || key === 'L') {
     if (state.locked) {
       clearLock();
@@ -1353,7 +1361,7 @@ function updateWand() {
   const palmW = Math.hypot(pts[17].x - pts[5].x, pts[17].y - pts[5].y);
   state.lastHandRegion = {
     center: palmCenter,
-    size: Math.max(50, palmW * 1.4),
+    size: Math.max(40, palmW),  // palm width as base hand-size measure
     atTime: millis()
   };
 
@@ -2411,7 +2419,7 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 // before tracker scoring. Eliminates the most common failure mode where
 // trackers latch onto background objects with a similar shape or color.
 // =========================================================================
-const HAND_REACH_FACTOR     = 3.5;   // wand reach in multiples of hand size
+let   HAND_REACH_FACTOR     = 2.0;   // wand reach in multiples of hand size; tunable with { }
 const HAND_STALENESS_MS     = 2500;  // ignore gate after this long w/o hand
 function isWithinHandReach(point, factor) {
   factor = factor || HAND_REACH_FACTOR;

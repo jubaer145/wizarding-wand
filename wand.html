@@ -90,6 +90,7 @@
 <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script async src="https://docs.opencv.org/4.10.0/opencv.js" onload="onCvReady()"></script>
 </head>
 <body>
 <div id="status">Awakening the wand…</div>
@@ -97,10 +98,13 @@
 <div id="hedwigToggle" style="position:fixed; top:64px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(255,215,128,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#ffd780; font-family:monospace; cursor:pointer;" title="Click or press M to toggle Hedwig's Theme">
   ♪ Hedwig's Theme: on (M)
 </div>
-<div id="colorTrack" style="position:fixed; top:90px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.7); border:1px solid rgba(180,180,180,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#bbbbbb; font-family:monospace; cursor:pointer;" title="Click here to enter color-pick mode, then click your wand. P=pick, X=clear">
+<div id="houghStatus" style="position:fixed; top:90px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.7); border:1px solid rgba(255,49,210,0.4); border-radius:4px; font-size:11px; letter-spacing:1px; color:#ff9be0; font-family:monospace; cursor:pointer;" title="Direct wand detection via OpenCV Hough Lines. Click or H to toggle.">
+  ⌬ Hough detection: loading…
+</div>
+<div id="colorTrack" style="position:fixed; top:116px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.7); border:1px solid rgba(180,180,180,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#bbbbbb; font-family:monospace; cursor:pointer;" title="Click here to enter color-pick mode, then click your wand. P=pick, X=clear">
   P then click your wand to track its color
 </div>
-<div id="ambient" style="position:fixed; top:116px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(150,200,255,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#aabbff; font-family:monospace; cursor:pointer;" title="Click to load an audio file. Drop one anywhere on the page. Press A to toggle.">
+<div id="ambient" style="position:fixed; top:142px; left:12px; z-index:10; padding:6px 10px; background:rgba(0,0,0,0.65); border:1px solid rgba(150,200,255,0.3); border-radius:4px; font-size:11px; letter-spacing:1px; color:#aabbff; font-family:monospace; cursor:pointer;" title="Click to load an audio file. Drop one anywhere on the page. Press A to toggle.">
   Drop ambient sound here  ·  click to choose
 </div>
 <input type="file" id="ambientFile" accept="audio/*" style="display:none;">
@@ -127,7 +131,7 @@
   <div><span class="spell">Alohomora / Reparo</span> <span class="effect">— sparkle</span></div>
   <div style="margin-top:6px; color: #886; font-size: 10px; font-style: italic;">
     Speak the incantation, then flick to cast.<br>
-    <b>P</b> + click samples wand color (best tracking).<br>
+    <b>H</b> Hough auto-detect (best). <b>P</b>+click = color.<br>
     <b>K</b> drag base→tip · <b>R</b> reset · <b>D</b> debug.<br>
     <b>M</b> music · <b>A</b> ambient · "Mischief Managed" clears.
   </div>
@@ -308,6 +312,44 @@ try {
   if (savedColor && 'r' in savedColor) state.wandColor = savedColor;
 } catch(e) {}
 
+// OpenCV-based Hough Line wand detection
+state.cvReady = false;
+state.houghEnabled = true;            // on by default once CV loads
+state.lastHoughWand = null;           // {base, tip, score} from last detection
+const HOUGH_THRESHOLD     = 40;
+const HOUGH_MIN_LEN       = 30;
+const HOUGH_MAX_GAP       = 12;
+const HOUGH_PROXIMITY_R   = 80;
+
+window.onCvReady = function() {
+  // OpenCV declares itself globally as `cv`. The Module sets a callback
+  // for when the WASM runtime finishes initializing.
+  if (typeof cv === 'undefined') return;
+  if (cv.getBuildInformation) {
+    state.cvReady = true;
+    updateHoughUI();
+  } else if (cv.then) {
+    // Newer OpenCV builds expose a Promise
+    cv.then(() => { state.cvReady = true; updateHoughUI(); });
+  } else {
+    cv.onRuntimeInitialized = () => { state.cvReady = true; updateHoughUI(); };
+  }
+};
+function updateHoughUI() {
+  const el = document.getElementById('houghStatus');
+  if (!el) return;
+  if (!state.cvReady) {
+    el.textContent = '⌬ Hough detection: loading…';
+    el.style.color = '#ff9be0'; el.style.borderColor = 'rgba(255,49,210,0.4)';
+  } else if (state.houghEnabled) {
+    el.textContent = '⌬ Hough detection: ON  ·  H toggles';
+    el.style.color = '#aaffaa'; el.style.borderColor = 'rgba(150,255,150,0.5)';
+  } else {
+    el.textContent = '⌬ Hough detection: off  ·  H toggles';
+    el.style.color = '#888'; el.style.borderColor = 'rgba(120,120,120,0.3)';
+  }
+}
+
 // One Euro filter (Casiez/Roussel/Vogel 2012) — adaptive low-pass
 // minCutoff: cutoff at zero velocity (lower = smoother when still)
 // beta: how fast cutoff rises with velocity (higher = more responsive when moving)
@@ -372,6 +414,11 @@ function keyPressed() {
   else if (key === 'p' || key === 'P') {
     state.colorPicking = true;
     setStatus('Click on your wand to sample its color');
+  }
+  else if (key === 'h' || key === 'H') {
+    state.houghEnabled = !state.houghEnabled;
+    updateHoughUI();
+    setStatus(state.houghEnabled ? 'Hough on' : 'Hough off');
   }
   else if (key === 'x' || key === 'X') {
     if (state.wandColor) {
@@ -1135,6 +1182,11 @@ function wireAmbientUI() {
     else { state.colorPicking = true; setStatus('Click on your wand to sample its color'); }
   });
   updateColorTrackUI();
+  const houghEl = document.getElementById('houghStatus');
+  if (houghEl) houghEl.addEventListener('click', () => {
+    state.houghEnabled = !state.houghEnabled; updateHoughUI();
+  });
+  updateHoughUI();
   if (el) el.addEventListener('click', () => input && input.click());
   if (input) input.addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
@@ -1171,10 +1223,12 @@ function updateWand() {
     && state.latestResults.multiHandLandmarks
     && state.latestResults.multiHandLandmarks.length > 0;
 
-  // Color-only path: if MediaPipe lost the hand BUT we have a color
-  // sample, we can still locate the wand directly from the video frame.
-  if (!haveDetection && state.wandColor) {
-    const cw = detectWandFromColor();
+  // No-MediaPipe path: if Hough is ready or color is set, we can still
+  // locate the wand directly from the video frame.
+  if (!haveDetection && (state.cvReady && state.houghEnabled || state.wandColor)) {
+    let cw = null;
+    if (state.cvReady && state.houghEnabled) cw = detectWandViaHough(null);
+    if (!cw && state.wandColor) cw = detectWandFromColor();
     if (cw) {
       state.colorWand = cw;
       // Apply same second-pass smoothing
@@ -1271,18 +1325,28 @@ function updateWand() {
   state._fwd = { x: dirX, y: dirY };
   state._perp = { x: perpX, y: perpY };
 
-  // If color-based wand tracking is active and detects pixels, use those
-  // endpoints instead of the MediaPipe extrapolation. Bypasses the
-  // closed-fist hand-detection problem entirely.
+  // Detection priority for the wand position:
+  //   1. OpenCV Hough Line (direct detection of the wand as a line segment)
+  //   2. Color tracking (PCA on color-matched pixels)
+  //   3. MediaPipe extrapolation (default — works only when hand pose is good)
   let useBase = base, useTip = tip;
-  if (state.wandColor) {
+  let detSource = 'mediapipe';
+  if (state.cvReady && state.houghEnabled) {
+    const hw = detectWandViaHough(wrist);
+    if (hw) {
+      useBase = hw.base; useTip = hw.tip;
+      detSource = 'hough';
+    }
+  }
+  if (detSource === 'mediapipe' && state.wandColor) {
     const cw = detectWandFromColor();
     if (cw) {
       state.colorWand = cw;
-      useBase = cw.base;
-      useTip  = cw.tip;
+      useBase = cw.base; useTip = cw.tip;
+      detSource = 'color';
     }
   }
+  state._detSource = detSource;
 
   // Second smoothing pass on the derived wandBase/wandTip points themselves.
   if (!state.wandFilters) {
@@ -2388,6 +2452,118 @@ function detectWandFromColor() {
   return { base, tip, count };
 }
 
+// Hough Line Transform via OpenCV.js — detects the wand directly as a
+// straight line segment in the video. Robust across grip, lighting, color.
+function detectWandViaHough(wristPoint /* in canvas coords, may be null */) {
+  if (!state.cvReady || typeof cv === 'undefined') return null;
+  if (!refreshOffCanvas()) return null;
+  const sx = width / OFF_W, sy = height / OFF_H;
+  let src = null, gray = null, blur = null, edges = null, lines = null;
+  try {
+    const imgData = state.offCtx.getImageData(0, 0, OFF_W, OFF_H);
+    src = cv.matFromImageData(imgData);
+    gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    blur = new cv.Mat();
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 1.5, 1.5, cv.BORDER_DEFAULT);
+    edges = new cv.Mat();
+    cv.Canny(blur, edges, 50, 150);
+    lines = new cv.Mat();
+    cv.HoughLinesP(edges, lines, 1, Math.PI / 180,
+                   HOUGH_THRESHOLD, HOUGH_MIN_LEN, HOUGH_MAX_GAP);
+
+    if (lines.rows === 0) return null;
+
+    // Convert wrist into off-canvas coordinates for proximity scoring
+    const wristOC = wristPoint
+      ? { x: wristPoint.x / sx, y: wristPoint.y / sy }
+      : null;
+    const lastTipOC = state.lastHoughWand
+      ? { x: state.lastHoughWand.tip.x / sx, y: state.lastHoughWand.tip.y / sy }
+      : null;
+
+    let best = null; // {score, x1,y1,x2,y2,len}
+    for (let i = 0; i < lines.rows; i++) {
+      const p = lines.data32S; // flat int32 buffer, 4 ints per row
+      const j = i * 4;
+      const x1 = p[j], y1 = p[j+1], x2 = p[j+2], y2 = p[j+3];
+      const dx = x2 - x1, dy = y2 - y1;
+      const len = Math.hypot(dx, dy);
+      if (len < HOUGH_MIN_LEN) continue;
+
+      // Proximity weight to last detection (use line midpoint distance)
+      const mxL = (x1 + x2) / 2, myL = (y1 + y2) / 2;
+      let proxW = 1.0;
+      if (lastTipOC) {
+        const dist = Math.hypot(mxL - lastTipOC.x, myL - lastTipOC.y);
+        proxW = Math.max(0.25, 1 - dist / (HOUGH_PROXIMITY_R + len));
+      } else if (wristOC) {
+        // Bonus: prefer lines whose nearest endpoint is close to the wrist
+        const da = Math.hypot(x1 - wristOC.x, y1 - wristOC.y);
+        const db = Math.hypot(x2 - wristOC.x, y2 - wristOC.y);
+        const near = Math.min(da, db);
+        proxW = Math.max(0.4, 1 - near / 200);
+      }
+
+      // Orientation penalty: if last detection was vertical-ish, penalize
+      // strongly horizontal lines (and vice versa) to prevent snapping to
+      // bookshelf edges, table edges, etc.
+      let orientW = 1.0;
+      if (state.lastHoughWand) {
+        const lt = state.lastHoughWand;
+        const ldx = lt.tip.x - lt.base.x, ldy = lt.tip.y - lt.base.y;
+        const lLen = Math.hypot(ldx, ldy) + 1e-3;
+        const cosT = (dx * ldx + dy * ldy) / (len * lLen);
+        // Quadratic falloff: aligned = 1, perpendicular = 0
+        orientW = Math.max(0.1, Math.abs(cosT));
+      }
+
+      const score = len * proxW * orientW;
+      if (!best || score > best.score) {
+        best = { score, x1, y1, x2, y2, len };
+      }
+    }
+    if (!best) return null;
+
+    // Map endpoints to full canvas
+    const A = { x: best.x1 * sx, y: best.y1 * sy };
+    const B = { x: best.x2 * sx, y: best.y2 * sy };
+
+    // Determine tip vs base
+    let tip, base;
+    if (state.lastHoughWand) {
+      const dA = Math.hypot(A.x - state.lastHoughWand.tip.x, A.y - state.lastHoughWand.tip.y);
+      const dB = Math.hypot(B.x - state.lastHoughWand.tip.x, B.y - state.lastHoughWand.tip.y);
+      tip  = dA < dB ? A : B;
+      base = dA < dB ? B : A;
+    } else if (wristPoint) {
+      // Endpoint farther from wrist = tip
+      const dA = Math.hypot(A.x - wristPoint.x, A.y - wristPoint.y);
+      const dB = Math.hypot(B.x - wristPoint.x, B.y - wristPoint.y);
+      tip  = dA > dB ? A : B;
+      base = dA > dB ? B : A;
+    } else {
+      // Heuristic: hand is usually near bottom of frame
+      const handY = height * 0.85;
+      tip  = Math.abs(A.y - handY) > Math.abs(B.y - handY) ? A : B;
+      base = tip === A ? B : A;
+    }
+
+    const result = { base, tip, score: best.score };
+    state.lastHoughWand = result;
+    return result;
+  } catch (e) {
+    console.warn('Hough error', e);
+    return null;
+  } finally {
+    if (src)   src.delete();
+    if (gray)  gray.delete();
+    if (blur)  blur.delete();
+    if (edges) edges.delete();
+    if (lines) lines.delete();
+  }
+}
+
 function pickWandColorAt(mx, my) {
   const c = sampleColorAtCanvas(mx, my);
   if (!c) return false;
@@ -3230,6 +3406,24 @@ function drawWand(ctx) {
       ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(state._knuckle.x, state._knuckle.y, 8, 0, Math.PI*2); ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  // Debug: show the actual Hough-detected line segment in magenta
+  if (state.debugLandmarks && state.lastHoughWand) {
+    const lh = state.lastHoughWand;
+    ctx.save();
+    ctx.shadowBlur = 14; ctx.shadowColor = '#ff31d2';
+    ctx.strokeStyle = 'rgba(255, 49, 210, 0.85)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(lh.base.x, lh.base.y);
+    ctx.lineTo(lh.tip.x, lh.tip.y);
+    ctx.stroke();
+    ctx.fillStyle = '#ff31d2';
+    ctx.beginPath(); ctx.arc(lh.base.x, lh.base.y, 5, 0, Math.PI*2); ctx.fill();
+    ctx.shadowColor = '#fff'; ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(lh.tip.x, lh.tip.y, 5, 0, Math.PI*2); ctx.fill();
     ctx.restore();
   }
 }
